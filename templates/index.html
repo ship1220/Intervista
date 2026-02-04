@@ -41,6 +41,11 @@
     <p id="question"></p>
 
     <textarea id="answer" placeholder="Type your answer here..."></textarea>
+    <p id="speech-analysis" style="margin-top:10px; color:#c1fff0;"></p>
+    <div style="margin-top:10px;">
+      <button type="button" onclick="startRecording()">🎤 Start Recording</button>
+      <button type="button" onclick="stopRecording()">⏹ Stop Recording</button>
+    </div>
     <button type="button" onclick="submitAnswer()">Submit Answer</button>
   </div>
 
@@ -87,6 +92,51 @@
         document.getElementById("answer").value = "";
       }
     }
+
+    let mediaRecorder;
+    let audioChunks = [];
+
+    // Start recording
+    async function startRecording() {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorder = new MediaRecorder(stream);
+      audioChunks = [];
+    
+      mediaRecorder.ondataavailable = event => {
+        audioChunks.push(event.data);
+      };
+    
+      mediaRecorder.start();
+      alert("Recording started...");
+    }
+    
+    // Stop recording
+    function stopRecording() {
+      mediaRecorder.stop();
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunks, { type: "audio/webm" });
+        const formData = new FormData();
+        formData.append("audio", audioBlob);
+  
+        const response = await fetch("/speech_to_text/", {
+          method: "POST",
+          body: formData
+        });
+  
+        const data = await response.json();
+  
+        // ✅ THIS IS THE KEY LINE
+        document.getElementById("answer").value = data.text || "";
+        if (data.analysis) {
+          document.getElementById("speech-analysis").innerHTML =
+            `🗣️ <b>Speech Stats</b><br>
+             Words: ${data.analysis.word_count}<br>
+             Speed: ${data.analysis.wpm} WPM<br>
+             Fillers: ${data.analysis.filler_count}`;
+        }   
+        alert("Speech converted to text!");
+      };
+  }
   </script>
 
 </body>

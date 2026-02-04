@@ -5,12 +5,57 @@ from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi import UploadFile, File
 
 from dotenv import load_dotenv
-import google.genai as genai
+#import google.genai as genai
 import os
 import requests
 import random
+import whisper
+import subprocess
+import uuid
+
+# ---------- SPEECH ANALYSIS HELPER  ----------
+def analyze_speech(text: str, duration_sec: float):
+    words = text.strip().split()
+    word_count = len(words)
+
+    minutes = duration_sec / 60 if duration_sec > 0 else 1
+    wpm = int(word_count / minutes)
+
+    fillers = ["um", "uh", "like", "you know", "actually"]
+    filler_count = sum(text.lower().count(f) for f in fillers)
+
+    analysis = {
+        "word_count": word_count,
+        "wpm": wpm,
+        "filler_count": filler_count
+    }
+
+    return analysis
+#------speech feedback from analysis------
+def speech_feedback_from_analysis(analysis: dict):
+    feedback = []
+
+    wpm = analysis["wpm"]
+    fillers = analysis["filler_count"]
+
+    # Speaking speed
+    if wpm < 90:
+        feedback.append("You are speaking a bit slowly. Try to sound more confident and fluent.")
+    elif wpm > 160:
+        feedback.append("You are speaking too fast. Slow down slightly to improve clarity.")
+    else:
+        feedback.append("Your speaking speed is well balanced.")
+
+    # Filler words
+    if fillers > 5:
+        feedback.append("You used several filler words. Try to reduce them to sound more professional.")
+    else:
+        feedback.append("Good control over filler words.")
+
+    return " ".join(feedback)
 
 
 # ---------------- DB ----------------
@@ -20,11 +65,13 @@ def get_db():
 
 # ---------------- ENV ----------------
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+#GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")  # you have llama3:latest
 
+# ---------------- SPEECH MODEL ----------------
+whisper_model = whisper.load_model("base")
 
 # ---------------- APP ----------------
 app = FastAPI()
@@ -89,7 +136,11 @@ Return ONLY the question text.
         payload = {
             "model": OLLAMA_MODEL,
             "prompt": prompt,
-            "stream": False
+            "stream": False,
+            "options": 
+            {
+                "num_predict": 80
+             }
         }
         r = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=20)
         if r.status_code == 200:
@@ -101,18 +152,19 @@ Return ONLY the question text.
         print("Ollama question failed:", str(e))
 
     # 2) GEMINI (Secondary)
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt
-        )
-        text = response.text.strip() if hasattr(response, "text") else ""
-        if text:
-            return text
-    except Exception as e:
-        print("Gemini question failed:", str(e))
-
+    
+    # try:
+    #     client = genai.Client(api_key=GEMINI_API_KEY)
+    #     response = client.models.generate_content(
+    #         model="gemini-2.0-flash",
+    #         contents=prompt
+    #     )
+    #     text = response.text.strip() if hasattr(response, "text") else ""
+    #     if text:
+    #         return text
+    # except Exception as e:
+    #     print("Gemini question failed:", str(e)) 
+    
     # 3) DEFAULT (Final)
     level_key = level.lower().strip()
     if level_key not in DEFAULT_QUESTIONS:
@@ -123,10 +175,21 @@ Return ONLY the question text.
 def generate_feedback_with_fallback(role: str, level: str, answer: str) -> str:
     prompt = f"""
 You are an interviewer for {role} ({level}).
-Give short constructive feedback for this answer:
-"{answer}"
+Respond STRICTLY in the following format and DO NOT stop early:
 
-Also give a correct/improved answer in 3-5 lines.
+Strength:
+- (1–2 lines)
+
+Improvement:
+- (2–3 lines)
+
+Improved Answer:
+- (4–6 complete sentences)
+
+Candidate answer:
+{answer}
+
+Finish all sections fully before stopping.
 Keep it beginner-friendly.
 """.strip()
 
@@ -135,29 +198,44 @@ Keep it beginner-friendly.
         payload = {
             "model": OLLAMA_MODEL,
             "prompt": prompt,
-            "stream": False
+            "stream": False,
+            "options": {
+                "num_predict": 450,
+                "temperature": 0.7
+          }
         }
-        r = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=25)
+        r = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=90)
         if r.status_code == 200:
             data = r.json()
+            print("OLLAMA FEEDBACK RAW:", data)
             text = data.get("response", "").strip()
+            if len(text.split()) < 60:
+               print("⚠️ Feedback too short, using fallback expansion")
+               return (
+                   "Strength:\nYour answer shows effort and basic understanding.\n\n"
+                   "Improvement:\nAdd clearer structure and concrete examples.\n\n"
+                   "Improved Answer:\n"
+                   "A strong response would begin by clearly defining the concept, "
+                   "followed by an example and a brief explanation of why it matters in practice."
+               )
+
             if text:
                 return text
     except Exception as e:
         print("Ollama feedback failed:", str(e))
 
     # 2) GEMINI
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=prompt
-        )
-        text = response.text.strip() if hasattr(response, "text") else ""
-        if text:
-            return text
-    except Exception as e:
-        print("Gemini feedback failed:", str(e))
+    # try:
+    #     client = genai.Client(api_key=GEMINI_API_KEY)
+    #     response = client.models.generate_content(
+    #         model="gemini-1.5-flash",
+    #         contents=prompt
+    #     )
+    #     text = response.text.strip() if hasattr(response, "text") else ""
+    #     if text:
+    #         return text
+    # except Exception as e:
+    #     print("Gemini feedback failed:", str(e))
 
     # 3) DEFAULT
     return "Feedback unavailable right now. Improve clarity, add an example, and explain step-by-step."
@@ -253,7 +331,8 @@ async def start_interview(request: Request, role: str = Form(...), level: str = 
         "level": level,
         "round": 1,
         "difficulty": "easy",
-        "history": []
+        "history": [],
+        "last_speech_analysis": None
     }
 
     question_text = generate_question_with_fallback(role, level, "easy")
@@ -264,6 +343,13 @@ async def start_interview(request: Request, role: str = Form(...), level: str = 
 
 @app.post("/submit_answer/")
 async def submit_answer(request: Request, answer: str = Form(...)):
+    if not answer.strip():
+        return {
+            "feedback": "Please provide an answer so I can evaluate it.",
+            "next_question": interview_sessions.get(
+                request.cookies.get("user"), {}
+            ).get("history", [{}])[-1].get("question", "")
+        }
     username = request.cookies.get("user")
     if not username:
         return {"error": "Not logged in"}
@@ -282,8 +368,20 @@ async def submit_answer(request: Request, answer: str = Form(...)):
     # Feedback
     feedback_text = generate_feedback_with_fallback(role, level, answer)
 
+    # If speech analysis exists, merge it
+    speech_feedback = ""
+    if username in interview_sessions:
+        session = interview_sessions[username]
+        if "last_speech_analysis" in session and session["last_speech_analysis"]:
+            speech_feedback = speech_feedback_from_analysis(
+                session["last_speech_analysis"]
+            )
+    final_feedback = feedback_text
+
+    if speech_feedback:
+        final_feedback += "\n\n🗣️ Communication Feedback:\n" + speech_feedback
     # Difficulty adaptation (simple)
-    low = feedback_text.lower()
+    low = final_feedback.lower()
     if "incorrect" in low or "wrong" in low or "not correct" in low:
         session["difficulty"] = "easy"
     else:
@@ -308,7 +406,7 @@ async def submit_answer(request: Request, answer: str = Form(...)):
         topic="auto",
         difficulty=session["difficulty"],
         answer=answer,
-        feedback=feedback_text
+        feedback=final_feedback
     )
     db.add(attempt)
 
@@ -334,7 +432,7 @@ async def submit_answer(request: Request, answer: str = Form(...)):
 
     db.commit()
 
-    return {"feedback": feedback_text, "next_question": next_question}
+    return {"feedback": final_feedback, "next_question": next_question}
 
 
 @app.get("/progress", response_class=HTMLResponse)
@@ -349,3 +447,41 @@ def progress_page(request: Request):
         "progress.html",
         {"request": request, "username": username, "skills": skills}
     )
+@app.post("/speech_to_text/")
+async def speech_to_text(request: Request,audio: UploadFile = File(...)):
+    temp_id = str(uuid.uuid4())
+
+    webm_path = f"temp_{temp_id}.webm"
+    wav_path = f"temp_{temp_id}.wav"
+
+    # Save uploaded file
+    with open(webm_path, "wb") as f:
+        f.write(await audio.read())
+
+    # Convert to WAV for Whisper
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", webm_path, "-ar", "16000", "-ac", "1", wav_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+    # Transcribe
+    result = whisper_model.transcribe(wav_path,language="en",word_timestamps=True)
+    
+    segments = result.get("segments", [])
+    if segments:
+        duration = segments[-1]["end"]
+    else:
+        duration = 0.0
+
+    analysis = analyze_speech(result["text"], duration)
+# ✅ STORE ANALYSIS FOR SUBMIT_ANSWER
+    username = request.cookies.get("user")
+    if username and username in interview_sessions:
+        interview_sessions[username]["last_speech_analysis"] = analysis
+    # Cleanup
+    os.remove(webm_path)
+    os.remove(wav_path)
+    from fastapi import Request
+    return {"text": result["text"], "analysis": analysis}
+
