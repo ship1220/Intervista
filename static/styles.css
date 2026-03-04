@@ -1,0 +1,285 @@
+/* ============================= */
+/* Modern Tech UI - Professional */
+/* ============================= */
+
+/* Google Fonts */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+/* Root Variables */
+:root {
+  --primary: #2563eb;        /* Professional Blue */
+  --primary-hover: #1d4ed8;
+  --background: #0f172a;     /* Dark Slate */
+  --surface: #1e293b;        /* Card Background */
+  --surface-light: #334155;
+  --text-main: #f1f5f9;
+  --text-muted: #94a3b8;
+  --border: #334155;
+  --shadow: 0 10px 30px rgba(0,0,0,0.3);
+}
+
+/* Reset */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-family: 'Inter', sans-serif;
+}
+
+body {
+  background: var(--background);
+  color: var(--text-main);
+  min-height: 100vh;
+  padding: 40px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* ============================= */
+/* Headings */
+/* ============================= */
+h1 {
+  font-size: 2.8rem;
+  font-weight: 700;
+  margin-bottom: 40px;
+  text-align: center;
+  letter-spacing: -1px;
+}
+
+h2 {
+  font-size: 2rem;
+  margin-bottom: 20px;
+}
+
+/* ============================= */
+/* Cards */
+/* ============================= */
+.card,
+form#interview-form,
+#question-area,
+#feedback-area,
+.feature-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 30px;
+  box-shadow: var(--shadow);
+  transition: all 0.25s ease;
+  width: 100%;
+  max-width: 600px;
+}
+
+.card:hover,
+.feature-card:hover {
+  transform: translateY(-4px);
+  border-color: var(--primary);
+}
+
+/* ============================= */
+/* Forms */
+/* ============================= */
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+label {
+  font-size: 0.95rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+input,
+select,
+textarea {
+  background: var(--surface-light);
+  border: 1px solid var(--border);
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-size: 0.95rem;
+  color: var(--text-main);
+  transition: 0.2s ease;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  background: #0f172a;
+}
+
+/* ============================= */
+/* Buttons */
+/* ============================= */
+.btn,
+button {
+  background: var(--primary);
+  color: white;
+  border: none;
+  padding: 12px 18px;
+  border-radius: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.btn:hover,
+button:hover {
+  background: var(--primary-hover);
+  transform: translateY(-2px);
+}
+
+.btn.outline {
+  background: transparent;
+  border: 1px solid var(--primary);
+  color: var(--primary);
+}
+
+.btn.outline:hover {
+  background: var(--primary);
+  color: white;
+}
+
+/* ============================= */
+/* Question Area */
+/* ============================= */
+#question-area p#question {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--primary);
+}
+
+/* ============================= */
+/* Feedback */
+/* ============================= */
+#feedback-area h3 {
+  margin-bottom: 10px;
+  color: var(--primary);
+}
+
+#feedback-area p {
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+/* ============================= */
+/* Navbar */
+/* ============================= */
+.navbar {
+  width: 100%;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 16px 40px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.nav-container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.logo {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.nav-links a {
+  color: var(--text-muted);
+  margin-left: 20px;
+  text-decoration: none;
+  transition: 0.2s ease;
+}
+
+.nav-links a:hover {
+  color: var(--primary);
+}
+
+/* ============================= */
+/* Hero Section */
+/* ============================= */
+.hero {
+  text-align: center;
+  max-width: 900px;
+  padding: 80px 20px;
+}
+
+.subtitle {
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  margin-bottom: 30px;
+}
+
+/* ============================= */
+/* Features */
+/* ============================= */
+.features {
+  margin-top: 60px;
+  width: 100%;
+  max-width: 1100px;
+  text-align: center;
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 24px;
+}
+
+.feature-card h3 {
+  margin-bottom: 10px;
+  color: var(--primary);
+}
+
+.feature-card p {
+  color: var(--text-muted);
+}
+
+/* ============================= */
+/* Footer */
+/* ============================= */
+footer.contact {
+  margin-top: 60px;
+  padding: 40px 20px;
+  text-align: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  width: 100%;
+  max-width: 900px;
+}
+
+footer.contact a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+footer.contact a:hover {
+  text-decoration: underline;
+}
+
+/* ============================= */
+/* Responsive */
+/* ============================= */
+@media (max-width: 768px) {
+  h1 {
+    font-size: 2rem;
+  }
+
+  .navbar {
+    padding: 14px 20px;
+  }
+
+  .card,
+  form#interview-form,
+  #question-area,
+  #feedback-area {
+    padding: 20px;
+  }
+}

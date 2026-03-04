@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <title>Your Progress</title>
+</head>
+<body>
+  <h1>🌟 Progress Tracker</h1>
+  <div class="card">
+    <h3>📊 Skill Progress</h3>
+    <ul>
+      {% for skill in skills %}
+        <li>
+          <b>{{ skill.skill }}</b> — Attempts: {{ skill.attempts }}
+          {% if skill.weak %} ⚠️ Weak {% else %} ✅ Good {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+
+  </div>
+  <a href="/index" class="btn">⬅️ Back to Practice</a>
+</body>
+</html>
