@@ -8,187 +8,250 @@
 </head>
 <body>
 
-  <header class="page-header">
-    <h1>Interview Performance Report</h1>
+  <header class="page-header" style="max-width:900px;">
+    <h1>Performance Report</h1>
     <div class="top-right">
-      Logged in as <b>{{username}}</b>
+      Logged in as <b>{{ username }}</b>
+      <a href="/index" class="btn small-btn">Dashboard</a>
+      <a href="/progress" class="btn small-btn outline">Progress</a>
       <a href="/logout/" class="logout-link">Logout</a>
-      <a href="/index/" class="btn small-btn">Back to Dashboard</a>
     </div>
   </header>
 
-  <main style="max-width: 1000px; margin: 0 auto;">
+  <main class="report-main">
 
-    <!-- Candidate Profile -->
-    <section class="card">
-      <h2>👤 Candidate Profile</h2>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
-        <div>
-          <strong>Role:</strong> {{role}}
-        </div>
-        <div>
-          <strong>Interview Date:</strong> {{interview_date}}
-        </div>
-        <div>
-          <strong>Questions Answered:</strong> {{total_questions}}
-        </div>
-        <div>
-          <strong>Duration:</strong> {{total_duration}} seconds
-        </div>
+    {# ============================================================ #}
+    {# CANDIDATE PROFILE                                            #}
+    {# ============================================================ #}
+    <section class="card fade-in">
+      <h2>Candidate Profile</h2>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 24px;margin-top:12px;">
+        <div><strong style="color:var(--text-muted);font-size:.85rem;">Role</strong><br>{{ report.candidate_profile.role }}</div>
+        <div><strong style="color:var(--text-muted);font-size:.85rem;">Level</strong><br>{{ report.candidate_profile.level | capitalize }}</div>
+        <div><strong style="color:var(--text-muted);font-size:.85rem;">Date</strong><br>{{ report.candidate_profile.interview_date }}</div>
+        <div><strong style="color:var(--text-muted);font-size:.85rem;">Questions</strong><br>{{ report.candidate_profile.total_questions }}</div>
       </div>
     </section>
 
-    <!-- Overall Score -->
-    <section class="card">
-      <h2>📊 Overall Score</h2>
-      <div style="text-align: center; margin: 30px 0;">
-        <div style="font-size: 4rem; font-weight: bold; color: var(--primary);">{{overall_score}}/10</div>
-        <p style="color: var(--text-muted); margin-top: 10px;">Out of 10 points</p>
+    {# ============================================================ #}
+    {# OVERALL SCORE + VERDICT                                      #}
+    {# ============================================================ #}
+    <section class="card fade-in" style="text-align:center;">
+      <h2>Overall Performance</h2>
+
+      <!-- SVG circular gauge -->
+      <div class="score-gauge" style="margin:24px auto;">
+        <svg width="160" height="160" viewBox="0 0 160 160">
+          <circle class="gauge-bg" cx="80" cy="80" r="68"></circle>
+          <circle class="gauge-fill" cx="80" cy="80" r="68"
+                  stroke-dasharray="427.3"
+                  stroke-dashoffset="{{ 427.3 - (427.3 * report.overall_score / 100) }}"
+                  style="stroke:{% if report.overall_score >= 70 %}#10b981{% elif report.overall_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></circle>
+        </svg>
+        <div class="gauge-label">
+          <span class="gauge-value" style="color:{% if report.overall_score >= 70 %}#10b981{% elif report.overall_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};">{{ report.overall_score }}</span>
+          <span class="gauge-sub">out of 100</span>
+        </div>
       </div>
+
+      <!-- Verdict -->
+      <div style="margin-top:16px;">
+        {% set rec = report.verdict.recommendation %}
+        <span class="verdict-badge {% if rec == 'SHORTLISTED' %}shortlisted{% elif rec == 'BORDERLINE' %}borderline{% else %}reject{% endif %}">
+          {{ rec }}
+        </span>
+        <p style="color:var(--text-muted);margin-top:10px;font-size:.9rem;">
+          Confidence: {{ report.verdict.confidence_level }}
+        </p>
+      </div>
+
+      <!-- Suitable roles -->
+      {% if report.verdict.suitable_roles %}
+      <div style="margin-top:16px;">
+        <strong style="font-size:.85rem;color:var(--text-muted);">Suitable Roles</strong>
+        <div class="role-tags" style="justify-content:center;margin-top:8px;">
+          {% for role in report.verdict.suitable_roles %}
+          <span class="role-tag">{{ role }}</span>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
     </section>
 
-    <!-- Recruiter Verdict -->
-   <section class="card">
-  <h2>🎯 Recruiter Verdict</h2>
-
-  <div style="background: var(--surface-light); padding: 20px; border-radius: 10px; margin: 20px 0;">
-
-    {% if recruiter_verdict == 'Strong candidate' %}
-      <p style="font-size:1.2rem;font-weight:600;color:#10b981;">
-        {{recruiter_verdict}}
-      </p>
-
-    {% elif recruiter_verdict == 'Needs improvement' %}
-      <p style="font-size:1.2rem;font-weight:600;color:#f59e0b;">
-        {{recruiter_verdict}}
-      </p>
-
-    {% else %}
-      <p style="font-size:1.2rem;font-weight:600;color:#ef4444;">
-        {{recruiter_verdict}}
-      </p>
-
+    {# ============================================================ #}
+    {# PERFORMANCE SUMMARY                                          #}
+    {# ============================================================ #}
+    {% if report.performance_summary %}
+    <section class="card fade-in">
+      <h2>Performance Summary</h2>
+      <div class="summary-text">{{ report.performance_summary }}</div>
+    </section>
     {% endif %}
 
-  </div>
-</section>
-
-    <!-- Voice Analysis -->
-    <section class="card">
-      <h2>🎤 Voice Analysis</h2>
-      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px;">
-        <div style="text-align: center;">
-          <div style="font-size: 2rem; font-weight: bold; color: var(--primary);">{{avg_pace_wpm}}</div>
-          <p style="color: var(--text-muted);">Avg Speaking Pace (WPM)</p>
+    {# ============================================================ #}
+    {# VOICE ANALYSIS                                               #}
+    {# ============================================================ #}
+    <section class="card fade-in">
+      <h2>Voice Analysis</h2>
+      <div class="metrics-grid" style="margin-top:14px;">
+        <div class="metric-card">
+          <div class="metric-value">{{ report.voice_analysis.speaking_pace_wpm }}</div>
+          <div class="metric-label">Speaking Pace (WPM)</div>
         </div>
-        <div style="text-align: center;">
-          <div style="font-size: 2rem; font-weight: bold; color: var(--primary);">{{avg_filler_count}}</div>
-          <p style="color: var(--text-muted);">Avg Filler Words</p>
+        <div class="metric-card">
+          <div class="metric-value">{{ report.voice_analysis.total_filler_words }}</div>
+          <div class="metric-label">Filler Words</div>
         </div>
-        <div style="text-align: center;">
-          <div style="font-size: 2rem; font-weight: bold; color: var(--primary);">{{avg_clarity}}%</div>
-          <p style="color: var(--text-muted);">Avg Clarity Score</p>
+        <div class="metric-card">
+          <div class="metric-value">{{ report.voice_analysis.clarity_score }}</div>
+          <div class="metric-label">Clarity (0-100)</div>
         </div>
-        <div style="text-align: center;">
-          <div style="font-size: 2rem; font-weight: bold; color: var(--primary);">{{avg_engagement}}%</div>
-          <p style="color: var(--text-muted);">Avg Engagement Score</p>
+        <div class="metric-card">
+          <div class="metric-value">{{ report.voice_analysis.engagement_score }}</div>
+          <div class="metric-label">Engagement (0-100)</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">{{ report.voice_analysis.confidence_score }}</div>
+          <div class="metric-label">Confidence (0-100)</div>
         </div>
       </div>
     </section>
 
-    <!-- Content Analysis -->
-    <section class="card">
-      <h2>📝 Content Analysis</h2>
-      <div style="margin: 20px 0;">
-        <h3>Improvement Tips</h3>
-        <ul style="margin: 10px 0; padding-left: 20px;">
-          {% for tip in content_analysis.improvement_tips %}
-          <li>{{tip}}</li>
-          {% endfor %}
-        </ul>
-      </div>
-      <div style="margin: 20px 0;">
-        <h3>Recommended Learning Resources</h3>
-        <ul style="margin: 10px 0; padding-left: 20px;">
-          {% for resource in content_analysis.learning_resources %}
-          <li><strong>{{resource.topic}}:</strong> {{resource.resource}}</li>
-          {% endfor %}
-        </ul>
+    {# ============================================================ #}
+    {# CONTENT ANALYSIS                                             #}
+    {# ============================================================ #}
+    <section class="card fade-in">
+      <h2>Content Analysis</h2>
+
+      {% set ca = report.content_analysis %}
+      <div style="margin-top:14px;">
+        <!-- Average score -->
+        <div style="margin-bottom:14px;">
+          <strong style="font-size:.9rem;">Average Answer Score</strong>
+          <div class="score-bar-wrap">
+            <div class="score-bar">
+              <div class="score-bar-fill" style="width:{{ ca.average_score }}%;background:{% if ca.average_score >= 70 %}#10b981{% elif ca.average_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></div>
+            </div>
+            <span class="score-bar-value">{{ ca.average_score }}</span>
+          </div>
+        </div>
+        <!-- Relevance -->
+        <div style="margin-bottom:14px;">
+          <strong style="font-size:.9rem;">Relevance</strong>
+          <div class="score-bar-wrap">
+            <div class="score-bar">
+              <div class="score-bar-fill" style="width:{{ ca.relevance_score }}%;background:{% if ca.relevance_score >= 70 %}#10b981{% elif ca.relevance_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></div>
+            </div>
+            <span class="score-bar-value">{{ ca.relevance_score }}</span>
+          </div>
+        </div>
+        <!-- Depth -->
+        <div style="margin-bottom:14px;">
+          <strong style="font-size:.9rem;">Depth of Explanation</strong>
+          <div class="score-bar-wrap">
+            <div class="score-bar">
+              <div class="score-bar-fill" style="width:{{ ca.depth_score }}%;background:{% if ca.depth_score >= 70 %}#10b981{% elif ca.depth_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></div>
+            </div>
+            <span class="score-bar-value">{{ ca.depth_score }}</span>
+          </div>
+        </div>
+        <!-- STAR method -->
+        <div style="margin-bottom:4px;">
+          <strong style="font-size:.9rem;">STAR Method Usage</strong>
+          <div class="score-bar-wrap">
+            <div class="score-bar">
+              <div class="score-bar-fill" style="width:{{ ca.star_method_score }}%;background:{% if ca.star_method_score >= 70 %}#10b981{% elif ca.star_method_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></div>
+            </div>
+            <span class="score-bar-value">{{ ca.star_method_score }}</span>
+          </div>
+        </div>
       </div>
     </section>
 
-    <!-- Detailed Answer Report -->
-    <section class="card">
-      <h2>📋 Detailed Answer Report</h2>
-      {% for evaluation in detailed_answer_report %}
-      <div style="border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin: 20px 0;">
-        <h3 style="margin-bottom: 15px;">Question {{loop.index}}</h3>
-        
-        <div style="margin-bottom: 15px;">
-          <strong>Question:</strong>
-          <p style="margin: 5px 0; color: var(--text-muted);">{{evaluation.question}}</p>
+    {# ============================================================ #}
+    {# SESSION METADATA                                             #}
+    {# ============================================================ #}
+    <section class="card fade-in">
+      <h2>Session Statistics</h2>
+      <div class="metrics-grid" style="margin-top:14px;">
+        <div class="metric-card">
+          <div class="metric-value">{{ report.session_metadata.total_duration_seconds | round(0) | int }}s</div>
+          <div class="metric-label">Total Duration</div>
         </div>
-        
-        <div style="margin-bottom: 15px;">
+        <div class="metric-card">
+          <div class="metric-value">{{ report.session_metadata.average_speaking_pace_wpm }}</div>
+          <div class="metric-label">Avg Pace (WPM)</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">{{ report.session_metadata.total_filler_words }}</div>
+          <div class="metric-label">Total Fillers</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">{{ report.session_metadata.confidence_score }}</div>
+          <div class="metric-label">Confidence</div>
+        </div>
+      </div>
+    </section>
+
+    {# ============================================================ #}
+    {# DETAILED ANSWER REPORT                                       #}
+    {# ============================================================ #}
+    <section class="card fade-in" style="padding-bottom:10px;">
+      <h2>Detailed Answer Report</h2>
+
+      {% for ans in report.detailed_answers %}
+      <div class="answer-card">
+        <!-- Question header + score -->
+        <h3>
+          Q{{ loop.index }}.&nbsp; {{ ans.question }}
+        </h3>
+
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;">
+          <strong style="font-size:.9rem;">Score:</strong>
+          <span style="font-size:1.2rem;font-weight:700;color:{% if ans.score >= 70 %}#10b981{% elif ans.score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};">
+            {{ ans.score }}/100
+          </span>
+          <div class="score-bar" style="max-width:200px;">
+            <div class="score-bar-fill" style="width:{{ ans.score }}%;background:{% if ans.score >= 70 %}#10b981{% elif ans.score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></div>
+          </div>
+        </div>
+
+        <!-- Transcript -->
+        <div class="answer-section">
           <strong>Your Answer:</strong>
-          <p style="margin: 5px 0; background: var(--surface-light); padding: 10px; border-radius: 5px;">{{evaluation.candidate_answer}}</p>
+          <div class="transcript-box">{{ ans.transcript }}</div>
         </div>
-        
-       <div style="margin-bottom: 15px;">
-  <strong>Score:</strong>
 
-  {% if evaluation.score >= 80 %}
-  <span style="font-size:1.2rem;font-weight:bold;color:#10b981;">
-      {{evaluation.score}}/100
-  </span>
-
-  {% elif evaluation.score >= 60 %}
-  <span style="font-size:1.2rem;font-weight:bold;color:#f59e0b;">
-      {{evaluation.score}}/100
-  </span>
-
-  {% else %}
-  <span style="font-size:1.2rem;font-weight:bold;color:#ef4444;">
-      {{evaluation.score}}/100
-  </span>
-  {% endif %}
-
-      </div>
-        
-        <div style="margin-bottom: 15px;">
-          <strong>Ideal Answer:</strong>
-          <p style="margin: 5px 0; background: var(--surface-light); padding: 10px; border-radius: 5px; border-left: 4px solid var(--primary);">{{evaluation.ideal_answer}}</p>
-        </div>
-        
-        <div style="margin-bottom: 15px;">
+        <!-- Feedback (combined strengths, weaknesses, and improved approach) -->
+        {% if ans.feedback %}
+        <div class="answer-section">
           <strong>Feedback:</strong>
-          <p style="margin: 5px 0;">{{evaluation.feedback}}</p>
-        </div>
-        
-        {% if evaluation.strengths %}
-        <div style="margin-bottom: 15px;">
-          <strong>Strengths:</strong>
-          <ul style="margin: 5px 0; padding-left: 20px;">
-            {% for strength in evaluation.strengths %}
-            <li>{{strength}}</li>
-            {% endfor %}
-          </ul>
+          <p>{{ ans.feedback }}</p>
         </div>
         {% endif %}
-        
-        {% if evaluation.weaknesses %}
-        <div style="margin-bottom: 15px;">
-          <strong>Weaknesses:</strong>
-          <ul style="margin: 5px 0; padding-left: 20px;">
-            {% for weakness in evaluation.weaknesses %}
-            <li>{{weakness}}</li>
-            {% endfor %}
-          </ul>
+
+        <!-- Voice metrics chips -->
+        <div class="answer-section" style="margin-bottom:0;">
+          <strong>Voice Metrics:</strong>
+          <div class="answer-voice-chips">
+            <span class="voice-chip">{{ ans.voice_metrics.speaking_pace_wpm }} WPM</span>
+            <span class="voice-chip">{{ ans.voice_metrics.word_count }} words</span>
+            <span class="voice-chip">{{ ans.voice_metrics.filler_count }} fillers</span>
+            <span class="voice-chip">Clarity {{ ans.voice_metrics.clarity }}</span>
+            <span class="voice-chip">Engagement {{ ans.voice_metrics.engagement }}</span>
+          </div>
         </div>
-        {% endif %}
       </div>
       {% endfor %}
     </section>
+
+    {# ============================================================ #}
+    {# ACTIONS                                                      #}
+    {# ============================================================ #}
+    <div style="display:flex;gap:12px;justify-content:center;margin:24px 0 40px;">
+      <a href="/index" class="btn">Back to Dashboard</a>
+      <a href="/progress" class="btn outline">View Progress</a>
+    </div>
 
   </main>
 

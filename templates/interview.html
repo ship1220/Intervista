@@ -103,10 +103,11 @@
   // Interview state
   // =========================================================================
   let questions = [];
-  let answers   = [];   // [{question, answer}]
+  let answers   = [];   // [{question, answer, start_time, end_time, duration}]
   let currentIdx = 0;
   let recognition = null;
   let isListening = false;
+  let answerStartTime = null;
 
   // =========================================================================
   // TTS — SpeechSynthesis
@@ -235,7 +236,8 @@
       // AI speaks the question
       await speak(q);
 
-      // Listen for answer
+      // Listen for answer — capture timestamps
+      answerStartTime = new Date().toISOString();
       let answerText = '';
       try {
         answerText = await startListening();
@@ -245,8 +247,18 @@
           'Speech recognition unavailable — type your answer and click Skip to proceed.';
         answerText = await waitForSkipOrType();
       }
+      const answerEndTime = new Date().toISOString();
+      const durationSec = Math.max(1, Math.round(
+        (new Date(answerEndTime) - new Date(answerStartTime)) / 1000
+      ));
 
-      answers.push({ question: q, answer: answerText || '(no response)' });
+      answers.push({
+        question: q,
+        answer: answerText || '(no response)',
+        start_time: answerStartTime,
+        end_time: answerEndTime,
+        duration: durationSec,
+      });
       document.getElementById('voice-status-text').textContent = 'Moving to next question...';
       await sleep(800);
     }
@@ -273,21 +285,24 @@
   // =========================================================================
   async function evaluateAll() {
     showPhase(evaluatingPhase);
-    document.getElementById('eval-status').textContent = 'Analyzing your responses...';
+    document.getElementById('eval-status').textContent = 'Analyzing your responses — this may take a moment...';
 
     try {
       const resp = await fetch('/api/interview/evaluate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: ROLE, answers }),
+        body: JSON.stringify({
+          role: ROLE,
+          level: LEVEL,
+          questions_answers: answers,
+        }),
       });
 
       if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
 
-      const data = await resp.json();
-      console.log('[evaluate] response data:', data);
-      renderResults(data);
-      showPhase(resultsPhase);
+      // Report is stored server-side; redirect to the report page
+      await resp.json();
+      window.location.href = '/report';
     } catch (err) {
       console.error('[evaluate] error:', err);
       document.getElementById('eval-status').textContent =
@@ -366,10 +381,21 @@
 
   document.getElementById('btn-end-early').addEventListener('click', async () => {
     stopListening();
-    // Push any remaining transcript
+    // Push any remaining transcript with timing
     const partial = document.getElementById('live-transcript').value.trim();
     if (currentIdx < questions.length) {
-      answers.push({ question: questions[currentIdx], answer: partial || '(no response)' });
+      const endNow = new Date().toISOString();
+      const startT = answerStartTime || endNow;
+      const dur = Math.max(1, Math.round(
+        (new Date(endNow) - new Date(startT)) / 1000
+      ));
+      answers.push({
+        question: questions[currentIdx],
+        answer: partial || '(no response)',
+        start_time: startT,
+        end_time: endNow,
+        duration: dur,
+      });
     }
     // Skip remaining questions
     currentIdx = questions.length;

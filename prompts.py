@@ -158,6 +158,90 @@ IMPORTANT: Return ONLY valid JSON. No text before or after the JSON.
 }}"""
 
 
+def content_analysis_prompt(role: str, level: str, questions_answers: list[dict]) -> str:
+    """Prompt for detailed content evaluation of interview answers.
+
+    Returns a prompt that asks the LLM for a single combined feedback
+    paragraph per question (strengths + weaknesses + improved approach).
+    """
+    qa_block = ""
+    for i, item in enumerate(questions_answers, 1):
+        qa_block += f"\nQ{i}: {item['question']}\nA{i}: {item['answer']}\n"
+
+    return f"""You are a senior technical recruiter evaluating a candidate for {role} at the {level} level.
+
+Evaluate each question-answer pair below.
+
+For EACH answer provide:
+- "score": integer 0-100 based on correctness, depth, relevance, and structure
+- "feedback": ONE detailed paragraph that contains what the candidate did well, what needs improvement, and what a stronger answer would look like. Do NOT split into separate strengths/weaknesses fields.
+
+Also provide:
+- "overall_feedback": a 4-6 sentence professional summary of the candidate's overall performance, communication, and areas for improvement. Write in third person.
+- "aggregate": object with relevance_score, depth_score, star_method_score (each 0-100)
+
+Interview responses:
+{qa_block}
+
+You MUST return ONLY valid JSON. No markdown fences. No text before or after the JSON object.
+
+{{
+  "feedback_per_question": [
+    {{
+      "question": "the exact question text",
+      "candidate_answer": "the candidate's answer",
+      "score": 65,
+      "feedback": "Your answer showed a basic understanding of X, which is a good start. However, the explanation lacked specific technical details about Y and Z. A stronger answer would clearly describe the architecture, technologies used, and concrete results achieved."
+    }}
+  ],
+  "overall_feedback": "The candidate demonstrated ... Areas for improvement include ...",
+  "aggregate": {{
+    "relevance_score": 65,
+    "depth_score": 60,
+    "star_method_score": 50
+  }}
+}}"""
+
+
+def performance_summary_prompt(report_data: dict) -> str:
+    """Prompt for generating an executive performance summary."""
+    profile = report_data.get("candidate_profile", {})
+    voice = report_data.get("voice_analysis", {})
+    content = report_data.get("content_analysis", {})
+    meta = report_data.get("session_metadata", {})
+    verdict = report_data.get("verdict", {})
+
+    return f"""You are a senior career coach writing an executive performance summary for an interview candidate.
+
+Interview Performance Data:
+- Role: {profile.get('role', 'Unknown')}
+- Level: {profile.get('level', 'Unknown')}
+- Overall Score: {report_data.get('overall_score', 0)}/100
+- Verdict: {verdict.get('recommendation', 'N/A')}
+
+Voice Analysis:
+- Speaking Pace: {voice.get('speaking_pace_wpm', 0)} WPM
+- Total Filler Words: {voice.get('total_filler_words', 0)}
+- Clarity Score: {voice.get('clarity_score', 0)}/100
+- Engagement Score: {voice.get('engagement_score', 0)}/100
+- Confidence Score: {meta.get('confidence_score', 0)}/100
+
+Content Analysis:
+- Average Answer Score: {content.get('average_score', 0)}/100
+- Relevance: {content.get('relevance_score', 0)}/100
+- Depth: {content.get('depth_score', 0)}/100
+- STAR Method: {content.get('star_method_score', 0)}/100
+
+Write a 4-6 sentence professional summary covering:
+1. Overall candidate assessment
+2. Key communication strengths or issues
+3. Technical knowledge evaluation
+4. Specific areas for improvement
+
+Write in third person. Be specific and constructive. Do NOT use markdown formatting or bullet points.
+Return ONLY the plain-text summary paragraph, nothing else."""
+
+
 def interview_evaluation_prompt(role: str, questions_answers: list[dict]) -> str:
     qa_block = ""
     for i, item in enumerate(questions_answers, 1):

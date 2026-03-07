@@ -654,8 +654,228 @@ footer.contact a:hover {
 }
 
 /* ============================= */
-/* Responsive */
+/* Report Page */
 /* ============================= */
+.report-main {
+  max-width: 900px;
+  width: 100%;
+}
+
+.report-main .card {
+  max-width: 100%;
+}
+
+/* Score gauge (circular) */
+.score-gauge {
+  position: relative;
+  width: 160px;
+  height: 160px;
+  margin: 0 auto;
+}
+
+.score-gauge svg {
+  transform: rotate(-90deg);
+}
+
+.score-gauge .gauge-bg {
+  fill: none;
+  stroke: var(--surface-light);
+  stroke-width: 12;
+}
+
+.score-gauge .gauge-fill {
+  fill: none;
+  stroke-width: 12;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 1.2s ease;
+}
+
+.score-gauge .gauge-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.score-gauge .gauge-value {
+  font-size: 2.4rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.score-gauge .gauge-sub {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+/* Verdict badge */
+.verdict-badge {
+  display: inline-block;
+  padding: 8px 24px;
+  border-radius: 24px;
+  font-weight: 700;
+  font-size: 1.1rem;
+  letter-spacing: 0.5px;
+}
+
+.verdict-badge.shortlisted { background: rgba(16,185,129,.15); color: #10b981; }
+.verdict-badge.borderline  { background: rgba(245,158,11,.15); color: #f59e0b; }
+.verdict-badge.reject      { background: rgba(239,68,68,.15);  color: #ef4444; }
+
+/* Metric cards grid */
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 16px;
+}
+
+.metric-card {
+  background: var(--surface-light);
+  border-radius: 12px;
+  padding: 20px 16px;
+  text-align: center;
+}
+
+.metric-card .metric-value {
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: var(--primary);
+  line-height: 1.2;
+}
+
+.metric-card .metric-label {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+/* Score bar (horizontal) */
+.score-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+}
+
+.score-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--surface-light);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.score-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.8s ease;
+}
+
+.score-bar-value {
+  min-width: 36px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: right;
+}
+
+/* Answer detail card */
+.answer-card {
+  background: var(--surface-light);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  margin-bottom: 20px;
+}
+
+.answer-card h3 {
+  color: var(--primary);
+  margin-bottom: 14px;
+  font-size: 1.05rem;
+}
+
+.answer-section {
+  margin-bottom: 14px;
+}
+
+.answer-section strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.9rem;
+}
+
+.answer-section p,
+.answer-section .transcript-box {
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+
+.transcript-box {
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 0.92rem;
+}
+
+.ideal-box {
+  background: var(--background);
+  border-left: 4px solid var(--primary);
+  border-radius: 0 8px 8px 0;
+  padding: 12px;
+  font-size: 0.92rem;
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+
+.answer-voice-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.voice-chip {
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* Suitable roles list */
+.role-tags {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.role-tag {
+  background: var(--primary);
+  color: white;
+  padding: 4px 14px;
+  border-radius: 16px;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+/* Summary block */
+.summary-text {
+  background: var(--surface-light);
+  border-radius: 12px;
+  padding: 20px;
+  line-height: 1.7;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+/* ============================= */
+/* Responsive */
+/* =============================
 @media (max-width: 768px) {
   h1 {
     font-size: 2rem;
