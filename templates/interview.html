@@ -4,15 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="/static/styles.css" />
-  <title>Mock Interview</title>
+  <title>AI Voice Interview</title>
 </head>
 <body>
 
   <header class="page-header">
-    <h1>🎤 Mock Interview</h1>
-
+    <h1>AI Voice Interview</h1>
     <div class="top-right">
-      Logged in as <b>{{username}}</b>
+      Logged in as <b>{{ username }}</b>
       <a href="/index" class="btn small-btn">Back to Dashboard</a>
       <a href="/logout/" class="logout-link">Logout</a>
     </div>
@@ -20,180 +19,381 @@
 
   <main>
 
-    <section class="card">
-      <h2>{{ role }} - {{ level }}</h2>
-      <p style="color: var(--text-muted); margin-bottom: 10px;">Round: <span id="round-display">1</span> | Difficulty: <span id="difficulty-display">easy</span></p>
+    <!-- PHASE 1: Loading questions -->
+    <section id="loading-phase" class="card">
+      <h2>{{ role }} &mdash; {{ level }}</h2>
+      <div class="status-indicator">
+        <div class="pulse-dot"></div>
+        <span id="loading-status">Preparing your interview questions...</span>
+      </div>
     </section>
 
-    <section id="question-area" class="card">
-      <h3>Question</h3>
-      <p id="question" style="font-size: 1.1rem; color: var(--primary); margin-bottom: 20px;">{{ question }}</p>
+    <!-- PHASE 2: Voice interview -->
+    <section id="interview-phase" class="card" style="display:none;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <h2>{{ role }} &mdash; {{ level }}</h2>
+        <span class="badge" id="question-counter">Question 1 / 5</span>
+      </div>
 
-      <form id="answer-form">
-        <textarea 
-          id="answer" 
-          placeholder="Type your answer here..." 
-          style="min-height: 150px;"
-          required
-        ></textarea>
-         <p id="speech-analysis" style="margin-top:10px; color:#c1fff0;"></p>
-    <div style="margin-top:10px; display:flex; gap:10px; align-items:center;">
-      <button type="button" id="start-rec-btn" class="btn">🎤 Start Recording</button>
-      <button type="button" id="stop-rec-btn" class="btn">⏹ Stop Recording</button>
-      <span id="rec-status" style="color:var(--text-muted); font-size:0.95rem; margin-left:8px">Microphone: unknown</span>
-    </div>
+      <div id="interviewer-bubble" class="interviewer-bubble">
+        <div class="bubble-label">AI Interviewer</div>
+        <p id="current-question"></p>
+      </div>
 
-        <button type="submit" id="submit-btn" class="btn">Submit Answer</button>
-      </form>
+      <div id="voice-status" class="voice-status">
+        <div class="voice-ring" id="voice-ring"></div>
+        <span id="voice-status-text">Waiting...</span>
+      </div>
+
+      <div id="transcript-area" style="margin-top:16px;">
+        <label style="font-size:0.9rem;">Your answer (live transcript):</label>
+        <textarea id="live-transcript" readonly placeholder="Your speech will appear here..."
+                  style="min-height:80px;opacity:0.85;"></textarea>
+      </div>
+
+      <div style="margin-top:16px;display:flex;gap:12px;flex-wrap:wrap;">
+        <button id="btn-skip" class="btn outline" style="width:140px;">Skip Question</button>
+        <button id="btn-end-early" class="btn outline" style="width:180px;">End Interview Early</button>
+      </div>
     </section>
 
-    <section id="feedback-area" class="card" style="display:none;">
-      <h3>📝 Feedback</h3>
-      <p id="feedback" style="color: var(--text-muted); line-height: 1.6;"></p>
-      <button id="next-btn" class="btn" style="margin-top: 20px;">Next Question</button>
+    <!-- PHASE 3: Evaluating -->
+    <section id="evaluating-phase" class="card" style="display:none;">
+      <h2>Interview Complete</h2>
+      <div class="status-indicator">
+        <div class="pulse-dot"></div>
+        <span id="eval-status">Analyzing your responses...</span>
+      </div>
+    </section>
+
+    <!-- PHASE 4: Results -->
+    <section id="results-phase" class="card" style="display:none;">
+      <h2>Interview Feedback</h2>
+      <div id="results-container"></div>
+
+      <div id="general-tips" style="margin-top:24px;"></div>
+      <div id="resources" style="margin-top:16px;"></div>
+
+      <div style="margin-top:24px;display:flex;gap:12px;">
+        <a href="/index" class="btn">Back to Dashboard</a>
+        <a href="/progress" class="btn outline">View Progress</a>
+      </div>
     </section>
 
   </main>
 
-  <script>
-    const answerForm = document.getElementById("answer-form");
-    const submitBtn = document.getElementById("submit-btn");
-    const nextBtn = document.getElementById("next-btn");
-    const questionArea = document.getElementById("question-area");
-    const feedbackArea = document.getElementById("feedback-area");
-    const questionDisplay = document.getElementById("question");
-    const feedbackDisplay = document.getElementById("feedback");
-    const answerInput = document.getElementById("answer");
-    const roundDisplay = document.getElementById("round-display");
-    const difficultyDisplay = document.getElementById("difficulty-display");
+<script>
+(function() {
+  // =========================================================================
+  // Config from template
+  // =========================================================================
+  const ROLE  = "{{ role }}";
+  const LEVEL = "{{ level }}";
+  const TOTAL_QUESTIONS = 5;
 
-    // Submit answer
-    answerForm.addEventListener("submit", async function (e) {
-      e.preventDefault();
+  // =========================================================================
+  // Phase elements
+  // =========================================================================
+  const loadingPhase    = document.getElementById('loading-phase');
+  const interviewPhase  = document.getElementById('interview-phase');
+  const evaluatingPhase = document.getElementById('evaluating-phase');
+  const resultsPhase    = document.getElementById('results-phase');
 
-      const answer = answerInput.value.trim();
+  // =========================================================================
+  // Interview state
+  // =========================================================================
+  let questions = [];
+  let answers   = [];   // [{question, answer}]
+  let currentIdx = 0;
+  let recognition = null;
+  let isListening = false;
 
-      if (!answer) {
-        alert("Please enter your answer.");
+  // =========================================================================
+  // TTS — SpeechSynthesis
+  // =========================================================================
+  function speak(text) {
+    return new Promise((resolve) => {
+      if (!('speechSynthesis' in window)) { resolve(); return; }
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.rate = 1.0;
+      utter.pitch = 1.0;
+      utter.onend = resolve;
+      utter.onerror = resolve;
+      window.speechSynthesis.speak(utter);
+    });
+  }
+
+  // =========================================================================
+  // STT — Web Speech API
+  // =========================================================================
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  function startListening() {
+    return new Promise((resolve, reject) => {
+      if (!SpeechRecognition) {
+        reject(new Error('Speech recognition not supported'));
         return;
       }
 
-      try {
-        submitBtn.disabled = true;
-        submitBtn.innerText = "Submitting...";
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
 
-        const response = await fetch("/submit_answer/", {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({ answer })
-        });
+      let finalTranscript = '';
+      let silenceTimer = null;
+      const SILENCE_TIMEOUT = 4000;  // 4 seconds of silence = done
 
-        const data = await response.json();
+      const transcript = document.getElementById('live-transcript');
+      const statusText = document.getElementById('voice-status-text');
+      const ring = document.getElementById('voice-ring');
 
-        if (!response.ok) {
-          throw new Error(data.error || "Submission failed.");
-        }
+      recognition.onstart = () => {
+        isListening = true;
+        statusText.textContent = 'Listening... speak now';
+        ring.classList.add('active');
+      };
 
-        // Show feedback
-        questionArea.style.display = "none";
-        feedbackArea.style.display = "block";
-        feedbackDisplay.innerText = data.feedback;
-
-        // Store next question and session data for use when clicking next
-        nextBtn.dataset.nextQuestion = data.next_question;
-
-        feedbackArea.scrollIntoView({ behavior: "smooth" });
-
-      } catch (err) {
-        alert(err.message || "Server error.");
-      } finally {
-        submitBtn.disabled = false;
-        submitBtn.innerText = "Submit Answer";
-      }
-    });
-
-    // Move to next question
-    nextBtn.addEventListener("click", function () {
-      const nextQuestion = nextBtn.dataset.nextQuestion;
-
-      if (!nextQuestion) {
-        alert("No next question available.");
-        return;
-      }
-
-      questionDisplay.innerText = nextQuestion;
-      answerInput.value = "";
-
-      feedbackArea.style.display = "none";
-      questionArea.style.display = "block";
-
-      questionArea.scrollIntoView({ behavior: "smooth" });
-    });
-    let mediaRecorder;
-    let audioChunks = [];
-
-    const startBtn = document.getElementById('start-rec-btn');
-    const stopBtn = document.getElementById('stop-rec-btn');
-    const recStatus = document.getElementById('rec-status');
-
-    // feature detect
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      recStatus.innerText = 'Microphone not supported in this browser';
-      startBtn.disabled = true;
-      stopBtn.disabled = true;
-    } else {
-      recStatus.innerText = 'Microphone: ready';
-    }
-
-    startBtn.addEventListener('click', async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaRecorder = new MediaRecorder(stream);
-        audioChunks = [];
-
-        mediaRecorder.ondataavailable = event => audioChunks.push(event.data);
-        mediaRecorder.start();
-        recStatus.innerText = 'Recording...';
-        startBtn.disabled = true;
-        stopBtn.disabled = false;
-      } catch (err) {
-        recStatus.innerText = 'Microphone denied or error';
-        alert('Could not start recording: ' + (err.message || err));
-      }
-    });
-
-    stopBtn.addEventListener('click', async () => {
-      if (!mediaRecorder) return;
-      mediaRecorder.stop();
-      recStatus.innerText = 'Processing...';
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
-
-      mediaRecorder.onstop = async () => {
-        try {
-          const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-          const formData = new FormData();
-          formData.append('audio', audioBlob, 'answer.webm');
-
-          const resp = await fetch('/speech_to_text/', { method: 'POST', body: formData });
-          const data = await resp.json();
-
-          document.getElementById('answer').value = data.text || '';
-          if (data.analysis) {
-            document.getElementById('speech-analysis').innerHTML =
-              `🗣️ <b>Speech Stats</b><br>
-               Words: ${data.analysis.word_count}<br>
-               Speed: ${data.analysis.wpm} WPM<br>
-               Fillers: ${data.analysis.filler_count}`;
+      recognition.onresult = (event) => {
+        clearTimeout(silenceTimer);
+        let interim = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          if (event.results[i].isFinal) {
+            finalTranscript += event.results[i][0].transcript + ' ';
+          } else {
+            interim += event.results[i][0].transcript;
           }
-          recStatus.innerText = 'Ready';
-        } catch (err) {
-          recStatus.innerText = 'Error uploading audio';
-          alert('Upload error: ' + (err.message || err));
+        }
+        transcript.value = finalTranscript + interim;
+
+        // Reset silence timer
+        silenceTimer = setTimeout(() => {
+          recognition.stop();
+        }, SILENCE_TIMEOUT);
+      };
+
+      recognition.onerror = (event) => {
+        if (event.error !== 'aborted') {
+          console.warn('Speech recognition error:', event.error);
         }
       };
+
+      recognition.onend = () => {
+        isListening = false;
+        ring.classList.remove('active');
+        statusText.textContent = 'Processing...';
+        clearTimeout(silenceTimer);
+        resolve(finalTranscript.trim());
+      };
+
+      recognition.start();
     });
-  </script>
+  }
+
+  function stopListening() {
+    if (recognition && isListening) {
+      recognition.stop();
+    }
+  }
+
+  // =========================================================================
+  // Phase transitions
+  // =========================================================================
+  function showPhase(phase) {
+    [loadingPhase, interviewPhase, evaluatingPhase, resultsPhase]
+      .forEach(el => el.style.display = 'none');
+    phase.style.display = 'block';
+    phase.scrollIntoView({ behavior: 'smooth' });
+  }
+
+  // =========================================================================
+  // 1. Fetch questions
+  // =========================================================================
+  async function fetchQuestions() {
+    const resp = await fetch(
+      `/api/interview/questions?role=${encodeURIComponent(ROLE)}&level=${encodeURIComponent(LEVEL)}&count=${TOTAL_QUESTIONS}`
+    );
+    const data = await resp.json();
+    return data.questions || [];
+  }
+
+  // =========================================================================
+  // 2. Run interview loop
+  // =========================================================================
+  async function runInterview() {
+    showPhase(interviewPhase);
+
+    for (currentIdx = 0; currentIdx < questions.length; currentIdx++) {
+      const q = questions[currentIdx];
+      document.getElementById('question-counter').textContent =
+        `Question ${currentIdx + 1} / ${questions.length}`;
+      document.getElementById('current-question').textContent = q;
+      document.getElementById('live-transcript').value = '';
+      document.getElementById('voice-status-text').textContent = 'AI is speaking...';
+
+      // AI speaks the question
+      await speak(q);
+
+      // Listen for answer
+      let answerText = '';
+      try {
+        answerText = await startListening();
+      } catch (e) {
+        // Fallback: let them type
+        document.getElementById('voice-status-text').textContent =
+          'Speech recognition unavailable — type your answer and click Skip to proceed.';
+        answerText = await waitForSkipOrType();
+      }
+
+      answers.push({ question: q, answer: answerText || '(no response)' });
+      document.getElementById('voice-status-text').textContent = 'Moving to next question...';
+      await sleep(800);
+    }
+
+    await evaluateAll();
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  // Fallback: wait for user to type and click skip
+  function waitForSkipOrType() {
+    return new Promise(resolve => {
+      const handler = () => {
+        const text = document.getElementById('live-transcript').value.trim();
+        resolve(text);
+      };
+      // Override skip to resolve
+      document.getElementById('btn-skip')._fallbackResolve = handler;
+    });
+  }
+
+  // =========================================================================
+  // 3. Evaluate all answers
+  // =========================================================================
+  async function evaluateAll() {
+    showPhase(evaluatingPhase);
+    document.getElementById('eval-status').textContent = 'Analyzing your responses...';
+
+    try {
+      const resp = await fetch('/api/interview/evaluate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: ROLE, answers }),
+      });
+
+      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+
+      const data = await resp.json();
+      console.log('[evaluate] response data:', data);
+      renderResults(data);
+      showPhase(resultsPhase);
+    } catch (err) {
+      console.error('[evaluate] error:', err);
+      document.getElementById('eval-status').textContent =
+        'Error generating feedback: ' + (err.message || err);
+    }
+  }
+
+  // =========================================================================
+  // 4. Render results
+  // =========================================================================
+  function renderResults(data) {
+    const container = document.getElementById('results-container');
+    const feedbacks = data.feedback_per_question || [];
+    let html = '';
+
+    if (!feedbacks.length) {
+      html = '<p style="color:var(--text-muted);">No feedback was generated. Please try again.</p>';
+    }
+
+    feedbacks.forEach((fb, i) => {
+      // Use fields from the structured response; fall back to local answers array
+      const questionText = fb.question || (answers[i] || {}).question || '';
+      const answerText   = fb.candidate_answer || (answers[i] || {}).answer || '';
+      const feedback      = fb.feedback || '';
+      const improved      = fb.improved_answer || '';
+
+      html += `
+        <div class="feedback-card">
+          <h3>Q${i + 1}: ${escapeHtml(questionText)}</h3>
+          <p class="your-answer"><strong>Your answer:</strong> ${escapeHtml(answerText)}</p>
+          ${feedback ? `<p><strong>Feedback:</strong> ${escapeHtml(feedback)}</p>` : ''}
+          ${improved ? `<p class="improved"><strong>Improved answer:</strong> ${escapeHtml(improved)}</p>` : ''}
+        </div>`;
+    });
+    container.innerHTML = html;
+
+    // Improvement tips
+    const tips = data.improvement_tips || [];
+    if (tips.length) {
+      document.getElementById('general-tips').innerHTML =
+        '<h3>General Improvement Tips</h3><ul>' +
+        tips.map(t => `<li>${escapeHtml(typeof t === 'string' ? t : JSON.stringify(t))}</li>`).join('') + '</ul>';
+    }
+
+    // Learning resources — now objects with {topic, resource}
+    const resources = data.learning_resources || [];
+    if (resources.length) {
+      document.getElementById('resources').innerHTML =
+        '<h3>Recommended Learning Resources</h3><ul>' +
+        resources.map(r => {
+          if (typeof r === 'object' && r.topic) {
+            const desc = r.resource ? ` — ${escapeHtml(r.resource)}` : '';
+            return `<li><strong>${escapeHtml(r.topic)}</strong>${desc}</li>`;
+          }
+          return `<li>${escapeHtml(typeof r === 'string' ? r : JSON.stringify(r))}</li>`;
+        }).join('') + '</ul>';
+    }
+  }
+
+  function escapeHtml(str) {
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+  }
+
+  // =========================================================================
+  // Button handlers
+  // =========================================================================
+  document.getElementById('btn-skip').addEventListener('click', () => {
+    if (document.getElementById('btn-skip')._fallbackResolve) {
+      document.getElementById('btn-skip')._fallbackResolve();
+      return;
+    }
+    stopListening();
+  });
+
+  document.getElementById('btn-end-early').addEventListener('click', async () => {
+    stopListening();
+    // Push any remaining transcript
+    const partial = document.getElementById('live-transcript').value.trim();
+    if (currentIdx < questions.length) {
+      answers.push({ question: questions[currentIdx], answer: partial || '(no response)' });
+    }
+    // Skip remaining questions
+    currentIdx = questions.length;
+    await evaluateAll();
+  });
+
+  // =========================================================================
+  // Init
+  // =========================================================================
+  (async function init() {
+    try {
+      questions = await fetchQuestions();
+      if (!questions.length) throw new Error('No questions received');
+      document.getElementById('loading-status').textContent = 'Questions ready! Starting interview...';
+      await sleep(600);
+      await runInterview();
+    } catch (err) {
+      document.getElementById('loading-status').textContent =
+        'Error loading questions: ' + (err.message || err);
+    }
+  })();
+
+})();
+</script>
 
 </body>
 </html>

@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <title>Interview Performance Report - Job PrepMate</title>
+</head>
+<body>
+
+  <header class="page-header">
+    <h1>Interview Performance Report</h1>
+    <div class="top-right">
+      Logged in as <b>{{username}}</b>
+      <a href="/logout/" class="logout-link">Logout</a>
+      <a href="/index/" class="btn small-btn">Back to Dashboard</a>
+    </div>
+  </header>
+
+  <main style="max-width: 1000px; margin: 0 auto;">
+
+    <!-- Candidate Profile -->
+    <section class="card">
+      <h2>👤 Candidate Profile</h2>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+        <div>
+          <strong>Role:</strong> {{role}}
+        </div>
+        <div>
+          <strong>Interview Date:</strong> {{interview_date}}
+        </div>
+        <div>
+          <strong>Questions Answered:</strong> {{total_questions}}
+        </div>
+        <div>
+          <strong>Duration:</strong> {{total_duration}} seconds
+        </div>
+      </div>
+    </section>
+
+    <!-- Overall Score -->
+    <section class="card">
+      <h2>📊 Overall Score</h2>
+      <div style="text-align: center; margin: 30px 0;">
+        <div style="font-size: 4rem; font-weight: bold; color: var(--primary);">{{overall_score}}/10</div>
+        <p style="color: var(--text-muted); margin-top: 10px;">Out of 10 points</p>
+      </div>
+    </section>
+
+    <!-- Recruiter Verdict -->
+   <section class="card">
+  <h2>🎯 Recruiter Verdict</h2>
+
+  <div style="background: var(--surface-light); padding: 20px; border-radius: 10px; margin: 20px 0;">
+
+    {% if recruiter_verdict == 'Strong candidate' %}
+      <p style="font-size:1.2rem;font-weight:600;color:#10b981;">
+        {{recruiter_verdict}}
+      </p>
+
+    {% elif recruiter_verdict == 'Needs improvement' %}
+      <p style="font-size:1.2rem;font-weight:600;color:#f59e0b;">
+        {{recruiter_verdict}}
+      </p>
+
+    {% else %}
+      <p style="font-size:1.2rem;font-weight:600;color:#ef4444;">
+        {{recruiter_verdict}}
+      </p>
+
+    {% endif %}
+
+  </div>
+</section>
+
+    <!-- Voice Analysis -->
+    <section class="card">
+      <h2>🎤 Voice Analysis</h2>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px;">
+        <div style="text-align: center;">
+          <div style="font-size: 2rem; font-weight: bold; color: var(--primary);">{{avg_pace_wpm}}</div>
+          <p style="color: var(--text-muted);">Avg Speaking Pace (WPM)</p>
+        </div>
+        <div style="text-align: center;">
+          <div style="font-size: 2rem; font-weight: bold; color: var(--primary);">{{avg_filler_count}}</div>
+          <p style="color: var(--text-muted);">Avg Filler Words</p>
+        </div>
+        <div style="text-align: center;">
+          <div style="font-size: 2rem; font-weight: bold; color: var(--primary);">{{avg_clarity}}%</div>
+          <p style="color: var(--text-muted);">Avg Clarity Score</p>
+        </div>
+        <div style="text-align: center;">
+          <div style="font-size: 2rem; font-weight: bold; color: var(--primary);">{{avg_engagement}}%</div>
+          <p style="color: var(--text-muted);">Avg Engagement Score</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Content Analysis -->
+    <section class="card">
+      <h2>📝 Content Analysis</h2>
+      <div style="margin: 20px 0;">
+        <h3>Improvement Tips</h3>
+        <ul style="margin: 10px 0; padding-left: 20px;">
+          {% for tip in content_analysis.improvement_tips %}
+          <li>{{tip}}</li>
+          {% endfor %}
+        </ul>
+      </div>
+      <div style="margin: 20px 0;">
+        <h3>Recommended Learning Resources</h3>
+        <ul style="margin: 10px 0; padding-left: 20px;">
+          {% for resource in content_analysis.learning_resources %}
+          <li><strong>{{resource.topic}}:</strong> {{resource.resource}}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </section>
+
+    <!-- Detailed Answer Report -->
+    <section class="card">
+      <h2>📋 Detailed Answer Report</h2>
+      {% for evaluation in detailed_answer_report %}
+      <div style="border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin: 20px 0;">
+        <h3 style="margin-bottom: 15px;">Question {{loop.index}}</h3>
+        
+        <div style="margin-bottom: 15px;">
+          <strong>Question:</strong>
+          <p style="margin: 5px 0; color: var(--text-muted);">{{evaluation.question}}</p>
+        </div>
+        
+        <div style="margin-bottom: 15px;">
+          <strong>Your Answer:</strong>
+          <p style="margin: 5px 0; background: var(--surface-light); padding: 10px; border-radius: 5px;">{{evaluation.candidate_answer}}</p>
+        </div>
+        
+       <div style="margin-bottom: 15px;">
+  <strong>Score:</strong>
+
+  {% if evaluation.score >= 80 %}
+  <span style="font-size:1.2rem;font-weight:bold;color:#10b981;">
+      {{evaluation.score}}/100
+  </span>
+
+  {% elif evaluation.score >= 60 %}
+  <span style="font-size:1.2rem;font-weight:bold;color:#f59e0b;">
+      {{evaluation.score}}/100
+  </span>
+
+  {% else %}
+  <span style="font-size:1.2rem;font-weight:bold;color:#ef4444;">
+      {{evaluation.score}}/100
+  </span>
+  {% endif %}
+
+      </div>
+        
+        <div style="margin-bottom: 15px;">
+          <strong>Ideal Answer:</strong>
+          <p style="margin: 5px 0; background: var(--surface-light); padding: 10px; border-radius: 5px; border-left: 4px solid var(--primary);">{{evaluation.ideal_answer}}</p>
+        </div>
+        
+        <div style="margin-bottom: 15px;">
+          <strong>Feedback:</strong>
+          <p style="margin: 5px 0;">{{evaluation.feedback}}</p>
+        </div>
+        
+        {% if evaluation.strengths %}
+        <div style="margin-bottom: 15px;">
+          <strong>Strengths:</strong>
+          <ul style="margin: 5px 0; padding-left: 20px;">
+            {% for strength in evaluation.strengths %}
+            <li>{{strength}}</li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+        
+        {% if evaluation.weaknesses %}
+        <div style="margin-bottom: 15px;">
+          <strong>Weaknesses:</strong>
+          <ul style="margin: 5px 0; padding-left: 20px;">
+            {% for weakness in evaluation.weaknesses %}
+            <li>{{weakness}}</li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </section>
+
+  </main>
+
+</body>
+</html>

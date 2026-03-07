@@ -36,6 +36,12 @@
           <option value="senior">Senior</option>
         </select>
 
+        <label for="resume">Resume (optional)</label>
+        <input type="file" id="resume" accept=".pdf,.docx" />
+        <small id="resume-status" style="color: var(--text-muted); font-size: 0.85rem;">
+          Upload PDF or DOCX to get personalized interview questions
+        </small>
+
         <button type="submit" id="start-btn">Start Learning</button>
       </form>
     </section>
@@ -48,13 +54,17 @@
         <form id="interview-form" method="post" action="/start_interview/">
           <input type="hidden" id="hidden-role" name="role">
           <input type="hidden" id="hidden-level" name="level">
-          <button type="submit" class="btn" style="width:200px;">Take Mock Interview</button>
+          <button type="submit" class="btn" style="width:220px;" id="btn-interview">
+            Take Voice Interview
+          </button>
         </form>
 
         <form id="roadmap-form" method="post" action="/generate_course/">
           <input type="hidden" id="hidden-role-roadmap" name="role">
           <input type="hidden" id="hidden-designation" name="level">
-          <button type="submit" class="btn outline" style="width:200px;">Generate Course</button>
+          <button type="submit" class="btn outline" style="width:220px;" id="btn-course">
+            Generate Course
+          </button>
         </form>
       </div>
     </section>
@@ -67,15 +77,46 @@
   const inputSection = document.getElementById("input-section");
 
   // Show choices when form is submitted
-  startForm.addEventListener("submit", function (e) {
+  startForm.addEventListener("submit", async function (e) {
     e.preventDefault();
 
     const role = document.getElementById("role").value.trim();
     const level = document.getElementById("level").value;
+    const resumeFile = document.getElementById("resume").files[0];
 
     if (!role || !level) {
       alert("Please fill all fields.");
       return;
+    }
+
+    const startBtn = document.getElementById("start-btn");
+
+    // Upload resume if provided
+    if (resumeFile) {
+      startBtn.textContent = "Uploading resume...";
+      startBtn.disabled = true;
+      const fd = new FormData();
+      fd.append("file", resumeFile);
+      try {
+        const resp = await fetch("/api/upload_resume", { method: "POST", body: fd });
+        if (resp.ok) {
+          document.getElementById("resume-status").textContent = "\u2705 Resume uploaded successfully";
+          document.getElementById("resume-status").style.color = "#22c55e";
+        } else {
+          const err = await resp.json();
+          alert("Resume upload failed: " + (err.detail || "Unknown error"));
+          startBtn.textContent = "Start Learning";
+          startBtn.disabled = false;
+          return;
+        }
+      } catch (err) {
+        alert("Resume upload error: " + err.message);
+        startBtn.textContent = "Start Learning";
+        startBtn.disabled = false;
+        return;
+      }
+      startBtn.textContent = "Start Learning";
+      startBtn.disabled = false;
     }
 
     // Hide input section, show choices section
@@ -91,8 +132,18 @@
     document.getElementById("hidden-role-roadmap").value = role;
     document.getElementById("hidden-designation").value = level;
 
-    // Show choices section smoothly
+  // Show choices section smoothly
     choicesSection.scrollIntoView({ behavior: "smooth" });
+  });
+
+  // Add loading states to buttons on submit
+  document.getElementById('interview-form').addEventListener('submit', () => {
+    document.getElementById('btn-interview').textContent = 'Starting interview...';
+    document.getElementById('btn-interview').disabled = true;
+  });
+  document.getElementById('roadmap-form').addEventListener('submit', () => {
+    document.getElementById('btn-course').textContent = 'Loading...';
+    document.getElementById('btn-course').disabled = true;
   });
   </script>
 

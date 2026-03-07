@@ -44,19 +44,21 @@
       <h2>What would you like to do?</h2>
       <p id="role-display" style="color: var(--text-muted); margin-bottom: 20px;"></p>
 
-      <div style="display:flex;gap:15px;flex-wrap:wrap;justify-content:center;">
-        <form id="interview-form" method="post" action="/start_interview/">
-          <input type="hidden" id="hidden-role" name="role">
-          <input type="hidden" id="hidden-level" name="level">
-          <button type="submit" class="btn" style="width:200px;">Take Mock Interview</button>
-        </form>
+      <div style="display:flex; gap:20px; justify-content:center; align-items:center;">
+  
+  <form id="interview-form" method="post" action="/start_interview/">
+    <input type="hidden" id="hidden-role" name="role">
+    <input type="hidden" id="hidden-level" name="level">
+    <button type="submit" class="btn" style="width:220px;">Take Mock Interview</button>
+  </form>
 
-        <form id="roadmap-form" method="post" action="/generate_roadmap/">
-          <input type="hidden" id="hidden-role-roadmap" name="role">
-          <input type="hidden" id="hidden-designation" name="designation">
-          <button type="submit" class="btn outline" style="width:200px;">Generate Course</button>
-        </form>
-      </div>
+  <form id="roadmap-form" method="post" action="/generate_course/">
+    <input type="hidden" id="hidden-role-roadmap" name="role">
+    <input type="hidden" id="hidden-level-roadmap" name="level">
+    <button type="submit" class="btn outline" style="width:220px;">Generate Course</button>
+  </form>
+
+</div>
     </section>
 
   </main>
