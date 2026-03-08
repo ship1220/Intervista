@@ -2,33 +2,21 @@
 
 
 def interview_questions_prompt(role: str, level: str, count: int = 5) -> str:
-    return f"""You are an expert interviewer for the role of {role} at the {level} level.
-Generate exactly {count} realistic interview questions that would be asked in a real interview.
-Mix behavioral, technical, and situational questions appropriate for this role and level.
-
-Return ONLY a JSON array of strings, no extra text. Example format:
-["Question 1?", "Question 2?", "Question 3?", "Question 4?", "Question 5?"]"""
+    return f"""Generate {count} interview questions for a {level} {role}. Mix behavioral, technical, and situational.
+Return ONLY a JSON array of strings:
+["Question 1?", "Question 2?"]"""
 
 
 def interview_questions_with_resume_prompt(role: str, level: str, resume_text: str, count: int = 5) -> str:
-    truncated = resume_text[:3000]
-    return f"""You are an expert interviewer for the role of {role} at the {level} level.
+    truncated = resume_text[:800]
+    return f"""Generate {count} personalized interview questions for a {level} {role} based on their resume.
+Mix: resume-specific, technical, behavioral, and gap-probing questions.
 
-The candidate has submitted the following resume:
----
+Resume:
 {truncated}
----
 
-Based on the candidate's resume, skills, projects, and experience, generate exactly {count} personalized interview questions.
-
-Mix these types:
-- Questions about specific projects or experiences from their resume
-- Technical questions relevant to their listed skills
-- Behavioral questions appropriate for the {level} level
-- At least one question probing gaps or growth areas
-
-Return ONLY a JSON array of strings, no extra text:
-["Question 1?", "Question 2?", "Question 3?", "Question 4?", "Question 5?"]"""
+Return ONLY a JSON array of strings:
+["Question 1?", "Question 2?"]"""
 
 
 def batch_evaluation_prompt(role: str, answers: list[dict]) -> str:
@@ -159,49 +147,19 @@ IMPORTANT: Return ONLY valid JSON. No text before or after the JSON.
 
 
 def content_analysis_prompt(role: str, level: str, questions_answers: list[dict]) -> str:
-    """Prompt for detailed content evaluation of interview answers.
-
-    Returns a prompt that asks the LLM for a structured evaluation.
-    """
+    """Prompt for detailed content evaluation of interview answers."""
     qa_block = ""
     for i, item in enumerate(questions_answers, 1):
-        qa_block += f"\nQ{i}: {item['question']}\nA{i}: {item['answer']}\n"
+        q = item['question'][:150]
+        a = item['answer'][:200]
+        qa_block += f"\nQ{i}: {q}\nA{i}: {a}\n"
 
-    return f"""You are a senior technical recruiter evaluating a candidate for {role} at the {level} level.
-
-Evaluate EACH of the {len(questions_answers)} question-answer pairs below. You MUST provide feedback for EVERY single question.
-
-For EACH answer provide:
-- "score": integer 0-100 based on correctness, depth, relevance, and structure
-- "feedback": detailed paragraph with strengths, weaknesses, and improved approach
-- "strengths": list of specific strengths in the answer
-- "improvements": list of specific areas for improvement
-
-Also provide:
-- "overall_feedback": 4-6 sentence professional summary
-- "aggregate": technical_score, communication_score, overall_score (each 0-100)
-
-Interview responses:
+    return f"""Evaluate these {len(questions_answers)} interview answers for a {level} {role}.
+For each provide: score (0-100), feedback (2-3 sentences), strengths (1-2 sentences on what was good), weaknesses (1-2 sentences on gaps), ideal_answer (3-4 sentence example of a strong answer for this question).
+Score fairly—brief but correct answers get 55-65.
 {qa_block}
-
-IMPORTANT: Return ONLY valid JSON. No markdown fences. No text before or after.
-
-{{
-  "answers": [
-    {{
-      "score": 75,
-      "feedback": "The answer demonstrated good understanding...",
-      "strengths": ["Specific strength 1", "Specific strength 2"],
-      "improvements": ["Could add more detail about X", "Consider Y"]
-    }}
-  ],
-  "overall_feedback": "The candidate demonstrated... Overall performance was...",
-  "aggregate": {{
-    "technical_score": 70,
-    "communication_score": 80,
-    "overall_score": 75
-  }}
-}}"""
+Return ONLY valid JSON:
+{{"answers":[{{"score":75,"feedback":"...","strengths":"...","weaknesses":"...","ideal_answer":"..."}}],"overall_feedback":"...","aggregate":{{"relevance_score":70,"depth_score":65,"star_method_score":50}}}}"""
 
 
 def performance_summary_prompt(report_data: dict) -> str:
@@ -212,35 +170,12 @@ def performance_summary_prompt(report_data: dict) -> str:
     meta = report_data.get("session_metadata", {})
     verdict = report_data.get("verdict", {})
 
-    return f"""You are a senior career coach writing an executive performance summary for an interview candidate.
-
-Interview Performance Data:
-- Role: {profile.get('role', 'Unknown')}
-- Level: {profile.get('level', 'Unknown')}
-- Overall Score: {report_data.get('overall_score', 0)}/100
-- Verdict: {verdict.get('recommendation', 'N/A')}
-
-Voice Analysis:
-- Speaking Pace: {voice.get('speaking_pace_wpm', 0)} WPM
-- Total Filler Words: {voice.get('total_filler_words', 0)}
-- Clarity Score: {voice.get('clarity_score', 0)}/100
-- Engagement Score: {voice.get('engagement_score', 0)}/100
-- Confidence Score: {meta.get('confidence_score', 0)}/100
-
-Content Analysis:
-- Average Answer Score: {content.get('average_score', 0)}/100
-- Relevance: {content.get('relevance_score', 0)}/100
-- Depth: {content.get('depth_score', 0)}/100
-- STAR Method: {content.get('star_method_score', 0)}/100
-
-Write a 4-6 sentence professional summary covering:
-1. Overall candidate assessment
-2. Key communication strengths or issues
-3. Technical knowledge evaluation
-4. Specific areas for improvement
-
-Write in third person. Be specific and constructive. Do NOT use markdown formatting or bullet points.
-Return ONLY the plain-text summary paragraph, nothing else."""
+    return f"""Write a 4-sentence professional interview performance summary.
+Role: {profile.get('role', 'Unknown')} ({profile.get('level', 'Unknown')}), Score: {report_data.get('overall_score', 0)}/100, Verdict: {verdict.get('recommendation', 'N/A')}
+Voice: {voice.get('speaking_pace_wpm', 0)} WPM, {voice.get('total_filler_words', 0)} fillers, clarity {voice.get('clarity_score', 0)}/100
+Content: avg {content.get('average_score', 0)}/100, relevance {content.get('relevance_score', 0)}, depth {content.get('depth_score', 0)}
+Cover: overall assessment, communication, technical knowledge, areas for improvement.
+Return ONLY the plain-text paragraph."""
 
 
 def interview_evaluation_prompt(role: str, questions_answers: list[dict]) -> str:

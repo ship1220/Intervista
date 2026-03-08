@@ -16,15 +16,23 @@ load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral")
 
 # Configuration
-OLLAMA_TIMEOUT_SECONDS = 120
-GEMINI_TIMEOUT_SECONDS = 60
-MAX_RETRIES = 3
-RETRY_DELAY_SECONDS = 2
+OLLAMA_TIMEOUT_SECONDS = 120    # per-chunk timeout (with streaming, only triggers if model hangs)
+GEMINI_TIMEOUT_SECONDS = 30
+MAX_RETRIES = 1                 # single attempt — streaming eliminates timeout-based retries
+RETRY_DELAY_SECONDS = 0.5
 CACHE_TTL_SECONDS = 300
 MAX_CACHE_SIZE = 200
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+# Startup diagnostics
+if not GEMINI_API_KEY:
+    print("[ai_service] WARNING: GEMINI_API_KEY not set — Gemini fallback disabled. "
+          "Ollama will be the only backend. Set GEMINI_API_KEY in .env for a cloud fallback.")
+print(f"[ai_service] Config: model={OLLAMA_MODEL}, timeout={OLLAMA_TIMEOUT_SECONDS}s, "
+      f"retries={MAX_RETRIES}, gemini={'enabled' if GEMINI_API_KEY else 'disabled'}")
 
 # ---------------------------------------------------------------------------
 # TTL Cache
@@ -51,17 +59,17 @@ def _cache_set(key: str, value: str) -> None:
 # Timeout configuration
 # ---------------------------------------------------------------------------
 _OLLAMA_TIMEOUT = httpx.Timeout(
-    connect=10.0,
+    connect=5.0,
     read=OLLAMA_TIMEOUT_SECONDS,
-    write=30.0,
-    pool=10.0,
+    write=10.0,
+    pool=5.0,
 )
 
 _GEMINI_TIMEOUT = httpx.Timeout(
-    connect=10.0,
+    connect=5.0,
     read=GEMINI_TIMEOUT_SECONDS,
-    write=30.0,
-    pool=10.0,
+    write=10.0,
+    pool=5.0,
 )
 
 # ---------------------------------------------------------------------------
@@ -125,14 +133,30 @@ def extract_json(text: str) -> Any:
         pass
 
     # Attempt 4: fix unescaped newlines inside strings
-    fixed = re.sub(r'(?<=["])((?:[^"\\]|\\.)*)(?=[":])',
+    fixed = re.sub(r'(?<=[\":])((?:[^"\\\\]|\\\\.)*)(?=[":])',
                    lambda m: m.group(0).replace('\n', '\\n'), fixed)
     try:
         return json.loads(fixed)
-    except json.JSONDecodeError as exc:
-        print(f"[extract_json] All parse attempts failed: {exc}")
-        print(f"[extract_json] Raw text ({len(text)} chars): {text[:500]}")
-        raise
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 5: repair truncated JSON by closing unclosed brackets/braces
+    repaired = fixed.rstrip().rstrip(',')
+    open_braces = repaired.count('{') - repaired.count('}')
+    open_brackets = repaired.count('[') - repaired.count(']')
+    if open_braces > 0 or open_brackets > 0:
+        repaired += ']' * max(open_brackets, 0)
+        repaired += '}' * max(open_braces, 0)
+        try:
+            result = json.loads(repaired)
+            print(f"[extract_json] Recovered truncated JSON (closed {open_braces} braces, {open_brackets} brackets)")
+            return result
+        except json.JSONDecodeError:
+            pass
+
+    print(f"[extract_json] All parse attempts failed")
+    print(f"[extract_json] Raw text ({len(text)} chars): {text[:500]}")
+    raise ValueError(f"Could not extract valid JSON from text ({len(text)} chars)")
 
 
 # ---------------------------------------------------------------------------
@@ -173,18 +197,22 @@ def get_fallback_response(num_questions: int = 5) -> Dict:
         "answers": [
             {
                 "score": 50,
-                "feedback": "AI evaluation service temporarily unavailable. Please retry the interview for detailed feedback.",
-                "strengths": ["Answer recorded successfully"],
-                "improvements": ["Retry interview when service is available"]
+                "feedback": (
+                    "AI evaluation service temporarily unavailable. "
+                    "Your answer was recorded. Please retry for detailed feedback."
+                ),
+                "strengths": "",
+                "weaknesses": "",
+                "ideal_answer": "",
             }
             for _ in range(num_questions)
         ],
-        "overall_feedback": "Evaluation service temporarily unavailable. Please retry the interview to receive comprehensive feedback on your responses.",
+        "overall_feedback": "Evaluation service temporarily unavailable. Please retry the interview.",
         "aggregate": {
-            "technical_score": 50,
-            "communication_score": 50,
-            "overall_score": 50
-        }
+            "relevance_score": 50,
+            "depth_score": 45,
+            "star_method_score": 30,
+        },
     }
 
 
@@ -192,154 +220,150 @@ def get_fallback_response(num_questions: int = 5) -> Dict:
 # Ollama Implementation
 # ---------------------------------------------------------------------------
 async def _try_ollama_with_retry(prompt: str, json_mode: bool = False) -> Optional[str]:
-    """Try Ollama with retry logic."""
-    
+    """Try Ollama /api/chat with limited retry.
+
+    Only uses /api/chat (not /api/generate) to avoid doubling latency.
+    Fails fast so the Gemini fallback can be reached without excessive delay.
+    """
     for attempt in range(MAX_RETRIES):
         try:
-            # Try chat endpoint first
             text = await _ollama_chat(prompt, json_mode)
             if text:
-                print(f"[ollama] Chat attempt {attempt + 1} succeeded")
                 return text
-            
-            # Try generate endpoint
-            text = await _ollama_generate(prompt, json_mode)
-            if text:
-                print(f"[ollama] Generate attempt {attempt + 1} succeeded")
-                return text
-                
+            print(f"[ollama] attempt {attempt + 1}: empty response")
         except httpx.ReadTimeout:
-            print(f"[ollama] ReadTimeout on attempt {attempt + 1}/{MAX_RETRIES}")
+            print(f"[ollama] attempt {attempt + 1}: timeout ({OLLAMA_TIMEOUT_SECONDS}s)")
+        except (httpx.ConnectError, httpx.ConnectTimeout, ConnectionRefusedError, OSError):
+            print(f"[ollama] Ollama not reachable at {OLLAMA_URL} — skipping retries")
+            return None
         except Exception as e:
-            print(f"[ollama] Error on attempt {attempt + 1}: {type(e).__name__}: {e}")
-        
+            print(f"[ollama] attempt {attempt + 1}: {type(e).__name__}: {e}")
+
         if attempt < MAX_RETRIES - 1:
-            print(f"[ollama] Retrying in {RETRY_DELAY_SECONDS}s...")
             await asyncio.sleep(RETRY_DELAY_SECONDS)
-    
+
     return None
 
 
 async def _ollama_chat(prompt: str, json_mode: bool = False) -> Optional[str]:
-    """Call Ollama /api/chat endpoint."""
+    """Call Ollama /api/chat with streaming.
+
+    Streaming is critical: with stream=False, Ollama buffers the entire
+    response before sending anything.  If generation takes longer than the
+    httpx read-timeout the request is killed even though Ollama is working.
+    With stream=True each token resets the read-timeout, so total generation
+    time is effectively unlimited.
+    """
     try:
         client = _get_ollama_client()
         system_msg = (
-            "You are a helpful AI assistant. You MUST respond with valid JSON only. "
-            "No markdown fences, no explanation before or after the JSON."
-        ) if json_mode else "You are a helpful AI assistant."
-        
+            "Respond with valid JSON only. No markdown fences, no extra text."
+        ) if json_mode else "You are a helpful assistant."
+
         payload = {
             "model": OLLAMA_MODEL,
             "messages": [
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": prompt},
             ],
-            "stream": False,
+            "stream": True,
+            "options": {
+                "num_predict": 2048,
+                "temperature": 0.3 if json_mode else 0.7,
+                "top_p": 0.9,
+            },
         }
         if json_mode:
             payload["format"] = "json"
-        
+
         start_time = time.time()
-        resp = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+        chunks: list[str] = []
+
+        async with client.stream("POST", f"{OLLAMA_URL}/api/chat", json=payload) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                print(f"[ollama] /api/chat HTTP {resp.status_code}: {body[:200]}")
+                return None
+
+            async for line in resp.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                    token = data.get("message", {}).get("content", "")
+                    if token:
+                        chunks.append(token)
+                    if data.get("done", False):
+                        break
+                except json.JSONDecodeError:
+                    continue
+
+        text = "".join(chunks).strip()
         latency = time.time() - start_time
-        print(f"[ollama] /api/chat latency: {latency:.2f}s")
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            text = (data.get("message", {}).get("content", "")).strip()
-            if text:
-                return text
-            print("[ollama] /api/chat returned 200 but empty content")
-        else:
-            print(f"[ollama] /api/chat HTTP {resp.status_code}: {resp.text[:200]}")
+        print(f"[ollama] /api/chat stream done: {latency:.1f}s, {len(chunks)} chunks, {len(text)} chars  json_mode={json_mode}")
+
+        if text:
+            return text
+        print("[ollama] /api/chat streaming completed but empty content")
     except httpx.ReadTimeout:
-        print("[ollama] /api/chat ReadTimeout")
+        print(f"[ollama] /api/chat ReadTimeout ({OLLAMA_TIMEOUT_SECONDS}s between chunks — model may be hung)")
         raise
+    except (httpx.ConnectError, httpx.ConnectTimeout, ConnectionRefusedError, OSError):
+        raise  # Let _try_ollama_with_retry handle connection failures
     except Exception as e:
         print(f"[ollama] /api/chat error: {type(e).__name__}: {e}")
     return None
 
 
-async def _ollama_generate(prompt: str, json_mode: bool = False) -> Optional[str]:
-    """Call Ollama /api/generate endpoint."""
-    try:
-        client = _get_ollama_client()
-        payload = {
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-        }
-        if json_mode:
-            payload["format"] = "json"
-        
-        start_time = time.time()
-        resp = await client.post(f"{OLLAMA_URL}/api/generate", json=payload)
-        latency = time.time() - start_time
-        print(f"[ollama] /api/generate latency: {latency:.2f}s")
-        
-        if resp.status_code == 200:
-            text = resp.json().get("response", "").strip()
-            if text:
-                return text
-            print("[ollama] /api/generate returned 200 but empty response")
-        else:
-            print(f"[ollama] /api/generate HTTP {resp.status_code}: {resp.text[:200]}")
-    except httpx.ReadTimeout:
-        print("[ollama] /api/generate ReadTimeout")
-        raise
-    except Exception as e:
-        print(f"[ollama] /api/generate error: {type(e).__name__}: {e}")
-    return None
-
 
 # ---------------------------------------------------------------------------
-# Gemini Implementation (Fixed for new SDK)
+# Gemini Fallback — fixed model name + SDK compatibility
 # ---------------------------------------------------------------------------
 async def _try_gemini(prompt: str) -> Optional[str]:
-    """Run Gemini with retry logic."""
+    """Run Gemini as fallback. Single attempt to minimise total latency."""
     if not GEMINI_API_KEY:
         print("[gemini] No GEMINI_API_KEY configured")
         return None
-    
-    for attempt in range(MAX_RETRIES):
-        try:
-            result = await _gemini_async(prompt)
-            if result:
-                print(f"[gemini] Attempt {attempt + 1} succeeded")
-                return result
-        except Exception as e:
-            print(f"[gemini] Error on attempt {attempt + 1}: {type(e).__name__}: {e}")
-        
-        if attempt < MAX_RETRIES - 1:
-            print(f"[gemini] Retrying in {RETRY_DELAY_SECONDS}s...")
-            await asyncio.sleep(RETRY_DELAY_SECONDS)
-    
+
+    try:
+        result = await _gemini_async(prompt)
+        if result:
+            print(f"[gemini] Success ({len(result)} chars)")
+            return result
+        print("[gemini] Empty response")
+    except Exception as e:
+        print(f"[gemini] Error: {type(e).__name__}: {e}")
+
     return None
 
 
 async def _gemini_async(prompt: str) -> str:
-    """Execute Gemini call asynchronously."""
+    """Execute Gemini call asynchronously.
+
+    Tries the new Client API first (google-generativeai >= 0.8 / google-genai),
+    then falls back to the legacy GenerativeModel API.
+    """
     def _call_gemini():
-        # Configure the API
-        genai.configure(api_key=GEMINI_API_KEY)
-        
-        # Use the correct model name
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        
         start_time = time.time()
-        response = model.generate_content(prompt)
+        try:
+            # New SDK style (google-generativeai >= 0.8 or google-genai package)
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+            )
+        except (AttributeError, TypeError):
+            # Old SDK style (google-generativeai < 0.8)
+            genai.configure(api_key=GEMINI_API_KEY)
+            model = genai.GenerativeModel(GEMINI_MODEL)
+            response = model.generate_content(prompt)
+
         latency = time.time() - start_time
-        print(f"[gemini] latency: {latency:.2f}s")
-        
+        print(f"[gemini] latency: {latency:.2f}s  model={GEMINI_MODEL}")
         return response.text.strip()
-    
-    try:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, _call_gemini)
-    except Exception as e:
-        print(f"[gemini] Async error: {type(e).__name__}: {e}")
-        raise
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _call_gemini)
 
 
 # ---------------------------------------------------------------------------
@@ -366,12 +390,15 @@ async def generate_content(
     
     # Fallback to Gemini
     if not result:
-        print("[ai_service] Ollama failed, trying Gemini...")
-        result = await _try_gemini(prompt)
+        if GEMINI_API_KEY:
+            print("[ai_service] Ollama failed, trying Gemini fallback...")
+            result = await _try_gemini(prompt)
+        else:
+            print("[ai_service] Ollama failed. Gemini unavailable (no GEMINI_API_KEY).")
     
     # If all failed, return empty
     if not result:
-        print("[ai_service] WARNING: All AI backends failed")
+        print(f"[ai_service] WARNING: All AI backends failed for prompt ({len(prompt)} chars): {prompt[:120]}...")
         return ""
     
     # Log preview
@@ -395,112 +422,82 @@ async def evaluate_content(
 ) -> Dict:
     """Evaluate interview content and return structured analysis."""
     from prompts import content_analysis_prompt
-    
+
     num_questions = len(questions_answers)
     prompt = content_analysis_prompt(role, level, questions_answers)
-    
-    # Try to get AI response
+
     raw = await generate_content(prompt, use_cache=False, json_mode=True)
-    
     print(f"[evaluate_content] Raw response length: {len(raw) if raw else 0}")
-    
-    # Try to parse and validate
+
     if raw and raw.strip():
         try:
             result = extract_json(raw)
-            print(f"[evaluate_content] Parsed JSON keys: {list(result.keys()) if isinstance(result, dict) else type(result)}")
-            
             if isinstance(result, dict):
-                # Try multiple times with retry for valid structure
-                for retry in range(2):
-                    if validate_response(result):
-                        # Normalize the response
-                        result = _normalize_response(result, num_questions)
-                        return result
-                    else:
-                        print(f"[evaluate_content] Response validation failed, attempt {retry + 1}")
-                        # Try one more time with different prompt or just return what we have
-                        if retry == 0:
-                            # Try to extract answers from different key formats
-                            result = _normalize_response(result, num_questions)
-                
-                # If still not valid, use fallback
-                if not validate_response(result):
-                    print("[evaluate_content] Using fallback - invalid structure")
-                    return get_fallback_response(num_questions)
-                
-                return result
-                
+                normalized = _normalize_response(result, num_questions)
+                print(f"[evaluate_content] Success: {len(normalized.get('answers', []))} answers")
+                return normalized
+            print(f"[evaluate_content] Unexpected type: {type(result).__name__}")
         except Exception as e:
             print(f"[evaluate_content] Parse error: {e}")
-    
-    # Return fallback
-    print("[evaluate_content] Using fallback - no valid response")
+            print(f"[evaluate_content] Raw text preview: {raw[:500]}")
+
+    print("[evaluate_content] Using fallback")
     return get_fallback_response(num_questions)
 
 
 def _normalize_response(result: Dict, num_questions: int) -> Dict:
-    """Normalize response to expected format."""
-    
+    """Normalize AI response to the format expected by main.py / report.html."""
+
     # Find answers from various possible keys
     answers = None
-    for key in ["answers", "feedback_per_question", "evaluations", "results", "response"]:
+    for key in ["answers", "feedback_per_question", "evaluations", "results"]:
         if key in result and isinstance(result[key], list):
             answers = result[key]
             break
-    
-    # Ensure we have answers for all questions
+
     if answers is None:
         answers = []
-    elif len(answers) < num_questions:
-        # Pad with default entries
-        while len(answers) < num_questions:
-            answers.append({
-                "score": 50,
-                "feedback": "Additional feedback pending.",
-                "strengths": [],
-                "improvements": []
-            })
-    
-    # Ensure each answer has required fields
+
+    # Normalize each answer entry
     normalized_answers = []
-    for i, ans in enumerate(answers[:num_questions]):
-        if isinstance(ans, dict):
+    for i in range(num_questions):
+        if i < len(answers) and isinstance(answers[i], dict):
+            ans = answers[i]
             normalized_answers.append({
                 "score": ans.get("score", 50),
                 "feedback": ans.get("feedback", ans.get("comment", "Feedback unavailable.")),
-                "strengths": ans.get("strengths", ans.get("strength", [])),
-                "improvements": ans.get("improvements", ans.get("improvements", []))
+                "strengths": ans.get("strengths", ""),
+                "weaknesses": ans.get("weaknesses", ""),
+                "ideal_answer": ans.get("ideal_answer", ""),
             })
         else:
             normalized_answers.append({
                 "score": 50,
-                "feedback": str(ans) if ans else "Feedback unavailable.",
-                "strengths": [],
-                "improvements": []
+                "feedback": "Feedback unavailable for this question.",
+                "strengths": "",
+                "weaknesses": "",
+                "ideal_answer": "",
             })
-    
-    # Get aggregate scores
+
+    # Preserve the original aggregate dict and add defaults for any
+    # keys that report.html needs but the AI may not have returned.
     aggregate = result.get("aggregate", result.get("scores", {}))
     if not isinstance(aggregate, dict):
         aggregate = {}
-    
-    # Ensure aggregate has required fields
-    normalized_aggregate = {
-        "technical_score": aggregate.get("technical_score", aggregate.get("technical", 50)),
-        "communication_score": aggregate.get("communication_score", aggregate.get("communication", 50)),
-        "overall_score": aggregate.get("overall_score", aggregate.get("overall", 50))
-    }
-    
-    # Get overall feedback
+
+    avg_score = sum(a["score"] for a in normalized_answers) / max(len(normalized_answers), 1)
+    aggregate.setdefault("relevance_score", round(avg_score))
+    aggregate.setdefault("depth_score", round(avg_score * 0.9))
+    aggregate.setdefault("star_method_score", round(avg_score * 0.7))
+
     overall_feedback = result.get("overall_feedback", result.get("summary", ""))
     if not overall_feedback:
-        overall_feedback = "Evaluation completed. Please review individual answer feedback above."
-    
+        overall_feedback = "Evaluation completed. Review individual feedback above."
+
     return {
         "answers": normalized_answers,
         "overall_feedback": overall_feedback,
-        "aggregate": normalized_aggregate
+        "aggregate": aggregate,
     }
 
 

@@ -241,37 +241,42 @@ async def api_interview_questions(request: Request, role: str, level: str, count
     else:
         prompt = interview_questions_prompt(role, level, count)
     raw = await generate_content(prompt, use_cache=False, json_mode=True)
-    print(f"[questions] Raw Ollama response: {raw[:300]}...")
+    print(f"[questions] Raw response length: {len(raw) if raw else 0}")
+    if raw and raw.strip():
+        print(f"[questions] Raw preview: {raw[:300]}")
 
-    try:
-        questions_data = extract_json(raw)
-        print(f"[questions] Extracted data type: {type(questions_data)}, keys: {list(questions_data.keys()) if isinstance(questions_data, dict) else 'N/A'}")
-        
-        # Handle both direct array and {"questions": [...]} formats
-        if isinstance(questions_data, list):
-            questions = questions_data
-        elif isinstance(questions_data, dict):
-            # Ollama might return {"questions": ["Q1", "Q2", ...]}
-            if "questions" in questions_data:
-                questions = questions_data["questions"]
-            elif "question" in questions_data:
-                questions = questions_data["question"]
-            else:
-                # Try to find any key that contains a list of strings
-                for key in questions_data:
-                    if isinstance(questions_data[key], list):
+    questions = []  # default to empty; filled below or replaced by static fallback
+
+    if not raw or not raw.strip():
+        print("[questions] Empty response from AI — will use static fallback")
+    else:
+        try:
+            questions_data = extract_json(raw)
+            print(f"[questions] Extracted type: {type(questions_data).__name__}")
+
+            # Handle direct array and {"questions": [...]} formats
+            if isinstance(questions_data, list):
+                questions = questions_data
+            elif isinstance(questions_data, dict):
+                for key in ("questions", "question"):
+                    if key in questions_data and isinstance(questions_data[key], list):
                         questions = questions_data[key]
                         break
-        
-        if not isinstance(questions, list):
-            raise ValueError("Expected a list")
-            
-        print(f"[questions] Extracted {len(questions)} questions")
-    except Exception as e:
-        print(f"[questions] Extraction error: {e}")
-        # Fallback: split by newlines and clean up
-        questions = [q.strip().lstrip("0123456789.)- ") for q in raw.strip().split("\n") if q.strip()]
-        questions = [q for q in questions if q.endswith("?")][:count]
+                else:
+                    # Try any key that has a list value
+                    for key in questions_data:
+                        if isinstance(questions_data[key], list):
+                            questions = questions_data[key]
+                            break
+
+            # Ensure every item is a string
+            questions = [str(q) for q in questions if q] if isinstance(questions, list) else []
+            print(f"[questions] Extracted {len(questions)} questions")
+        except Exception as e:
+            print(f"[questions] Extraction error: {e}")
+            # Last-resort: split by newlines and filter for question marks
+            questions = [q.strip().lstrip("0123456789.)- ") for q in raw.strip().split("\n") if q.strip()]
+            questions = [q for q in questions if q.endswith("?")][:count]
 
     if not questions:
         questions = [
@@ -356,11 +361,6 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
 
         content_scores = [a.get("score", 50) for a in content_answers]
         content_avg = sum(content_scores) / max(len(content_scores), 1)
-        
-        # Support both old and new aggregate formats
-        technical_score = aggregate.get("technical_score", aggregate.get("relevance_score", content_avg))
-        communication_score = aggregate.get("communication_score", aggregate.get("depth_score", content_avg))
-        overall_ai_score = aggregate.get("overall_score", content_avg)
 
         # -- FEATURE 6: Overall Score & Verdict ------------------------
         overall = compute_overall_score(content_avg, avg_clarity, avg_engagement)
@@ -400,6 +400,9 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
                 "transcript": answer_text,
                 "score": ca.get("score", 50),
                 "feedback": feedback_text,
+                "strengths": ca.get("strengths", ""),
+                "weaknesses": ca.get("weaknesses", ""),
+                "ideal_answer": ca.get("ideal_answer", ""),
                 "voice_metrics": {
                     "speaking_pace_wpm": sa.get("speaking_pace_wpm", 0),
                     "filler_count": sa.get("filler_word_count", 0),
@@ -426,12 +429,8 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
             },
             "content_analysis": {
                 "average_score": round(content_avg),
-                "technical_score": technical_score,
-                "communication_score": communication_score,
-                "overall_ai_score": overall_ai_score,
-                # Legacy keys for compatibility
-                "relevance_score": aggregate.get("relevance_score", technical_score),
-                "depth_score": aggregate.get("depth_score", communication_score),
+                "relevance_score": aggregate.get("relevance_score", round(content_avg)),
+                "depth_score": aggregate.get("depth_score", round(content_avg * 0.9)),
                 "star_method_score": aggregate.get("star_method_score", round(content_avg * 0.7)),
             },
             "detailed_answers": detailed_answers,
@@ -605,14 +604,6 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         db.commit()
 
         return evaluation
-    user = get_current_user(request, db)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not logged in")
-    return templates.TemplateResponse("course.html", {
-        "request": request,
-        "role": role,
-        "level": level,
-    })
 
 # ===========================================================================
 # REPORT PAGE

@@ -222,11 +222,35 @@
           <div class="transcript-box">{{ ans.transcript }}</div>
         </div>
 
-        <!-- Feedback (combined strengths, weaknesses, and improved approach) -->
+        <!-- Feedback -->
         {% if ans.feedback %}
         <div class="answer-section">
           <strong>Feedback:</strong>
           <p>{{ ans.feedback }}</p>
+        </div>
+        {% endif %}
+
+        <!-- Strengths -->
+        {% if ans.strengths %}
+        <div class="answer-section">
+          <strong style="color:#10b981;">&#10003; Strengths:</strong>
+          <p>{{ ans.strengths }}</p>
+        </div>
+        {% endif %}
+
+        <!-- Weaknesses -->
+        {% if ans.weaknesses %}
+        <div class="answer-section">
+          <strong style="color:#ef4444;">&#10007; Weaknesses:</strong>
+          <p>{{ ans.weaknesses }}</p>
+        </div>
+        {% endif %}
+
+        <!-- Ideal Answer -->
+        {% if ans.ideal_answer %}
+        <div class="answer-section">
+          <strong style="color:#6366f1;">&#9733; Ideal Answer:</strong>
+          <p style="background:var(--card-bg,#f8fafc);padding:10px 14px;border-radius:8px;border-left:3px solid #6366f1;margin-top:6px;">{{ ans.ideal_answer }}</p>
         </div>
         {% endif %}
 
