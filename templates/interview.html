@@ -212,10 +212,14 @@
   // 1. Fetch questions
   // =========================================================================
   async function fetchQuestions() {
+    console.log('[interview] Fetching questions from API...');
     const resp = await fetch(
       `/api/interview/questions?role=${encodeURIComponent(ROLE)}&level=${encodeURIComponent(LEVEL)}&count=${TOTAL_QUESTIONS}`
     );
     const data = await resp.json();
+    console.log('[interview] API response:', data);
+    console.log('[interview] Fetched questions:', data.questions);
+    console.log('[interview] Number of questions:', data.questions ? data.questions.length : 0);
     return data.questions || [];
   }
 
@@ -286,6 +290,8 @@
   async function evaluateAll() {
     showPhase(evaluatingPhase);
     document.getElementById('eval-status').textContent = 'Analyzing your responses — this may take a moment...';
+
+    console.log('[interview] Submitting for evaluation:', { role: ROLE, level: LEVEL, questions_answers: answers });
 
     try {
       const resp = await fetch('/api/interview/evaluate', {

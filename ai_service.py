@@ -1,4 +1,4 @@
-# ai_service.py — Async AI service with caching and Ollama → Gemini fallback
+# ai_service.py — Robust async AI service with Ollama → Gemini fallback
 
 import os
 import re
@@ -10,6 +10,7 @@ import statistics
 import httpx
 import google.generativeai as genai
 from dotenv import load_dotenv
+from typing import Optional, Dict, Any
 
 load_dotenv()
 
@@ -17,14 +18,21 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
+# Configuration
+OLLAMA_TIMEOUT_SECONDS = 120
+GEMINI_TIMEOUT_SECONDS = 60
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 2
+CACHE_TTL_SECONDS = 300
+MAX_CACHE_SIZE = 200
+
 # ---------------------------------------------------------------------------
-# Simple TTL cache — avoids redundant AI calls for identical prompts
+# TTL Cache
 # ---------------------------------------------------------------------------
-_cache: dict[str, dict] = {}
-CACHE_TTL_SECONDS = 300  # 5 minutes
+_cache: Dict[str, Dict] = {}
 
 
-def _cache_get(key: str) -> str | None:
+def _cache_get(key: str) -> Optional[str]:
     entry = _cache.get(key)
     if entry and (time.time() - entry["ts"]) < CACHE_TTL_SECONDS:
         return entry["value"]
@@ -33,26 +41,33 @@ def _cache_get(key: str) -> str | None:
 
 
 def _cache_set(key: str, value: str) -> None:
-    if len(_cache) > 200:
+    if len(_cache) > MAX_CACHE_SIZE:
         oldest = min(_cache, key=lambda k: _cache[k]["ts"])
         _cache.pop(oldest, None)
     _cache[key] = {"value": value, "ts": time.time()}
 
 
 # ---------------------------------------------------------------------------
-# Shared timeout — read must be generous for local LLM generation
+# Timeout configuration
 # ---------------------------------------------------------------------------
 _OLLAMA_TIMEOUT = httpx.Timeout(
-    connect=10.0,   # TCP connect
-    read=300.0,     # wait for Ollama to finish generating (5 min)
-    write=30.0,     # sending the prompt
-    pool=10.0,      # connection-pool acquisition
+    connect=10.0,
+    read=OLLAMA_TIMEOUT_SECONDS,
+    write=30.0,
+    pool=10.0,
+)
+
+_GEMINI_TIMEOUT = httpx.Timeout(
+    connect=10.0,
+    read=GEMINI_TIMEOUT_SECONDS,
+    write=30.0,
+    pool=10.0,
 )
 
 # ---------------------------------------------------------------------------
-# Reusable httpx client — avoids TCP handshake overhead per request
+# Reusable httpx client
 # ---------------------------------------------------------------------------
-_ollama_client: httpx.AsyncClient | None = None
+_ollama_client: Optional[httpx.AsyncClient] = None
 
 
 def _get_ollama_client() -> httpx.AsyncClient:
@@ -63,167 +78,21 @@ def _get_ollama_client() -> httpx.AsyncClient:
 
 
 # ---------------------------------------------------------------------------
-# Core async generation — tries Ollama first, then Gemini
+# JSON Extraction Helper
 # ---------------------------------------------------------------------------
-async def generate_content(prompt: str, *, use_cache: bool = True, json_mode: bool = False) -> str:
-    """Send *prompt* to an LLM and return the text response.
-
-    When *json_mode* is True, Ollama is instructed to constrain output to
-    valid JSON (``format: "json"``) and the system prompt is adjusted.
-    """
-    if use_cache:
-        cached = _cache_get(prompt)
-        if cached is not None:
-            print("[ai_service] returning cached response")
-            return cached
-
-    result = await _try_ollama(prompt, json_mode=json_mode)
-    if not result:
-        result = await _try_gemini(prompt)
-
-    if not result:
-        print(
-            "[ai_service] WARNING: All AI backends failed. "
-            "Ensure Ollama is running (ollama serve) or set GEMINI_API_KEY in .env"
-        )
-        return ""
-
-    # Log first 300 chars for debugging
-    preview = result[:300].replace("\n", " ")
-    print(f"[ai_service] response preview ({len(result)} chars): {preview}")
-
-    if use_cache:
-        _cache_set(prompt, result)
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Ollama — try /api/chat (better for instruction-tuned models), then
-#          fall back to /api/generate
-# ---------------------------------------------------------------------------
-async def _try_ollama(prompt: str, json_mode: bool = False) -> str | None:
-    """Attempt to get a response from Ollama. Returns None only if both
-    /api/chat and /api/generate fail or return empty text."""
-
-    # --- Attempt 1: /api/chat (preferred for llama3-style models) ---------
-    text = await _ollama_chat(prompt, json_mode=json_mode)
-    if text:
-        return text
-
-    # --- Attempt 2: /api/generate (raw completion) ------------------------
-    text = await _ollama_generate(prompt, json_mode=json_mode)
-    if text:
-        return text
-
-    return None
-
-
-async def _ollama_chat(prompt: str, json_mode: bool = False) -> str | None:
-    """Call Ollama /api/chat with a system + user message."""
-    try:
-        client = _get_ollama_client()
-        system_msg = (
-            "You are a helpful AI assistant. You MUST respond with valid JSON only. "
-            "No markdown fences, no explanation before or after the JSON."
-        ) if json_mode else (
-            "You are a helpful AI assistant."
-        )
-        payload = {
-            "model": OLLAMA_MODEL,
-            "messages": [
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": prompt},
-            ],
-            "stream": False,
-        }
-        if json_mode:
-            payload["format"] = "json"
-        print(f"[ai_service] POST {OLLAMA_URL}/api/chat  model={OLLAMA_MODEL}  json_mode={json_mode}")
-        resp = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
-
-        if resp.status_code == 200:
-            data = resp.json()
-            text = (data.get("message", {}).get("content", "")).strip()
-            if text:
-                return text
-            print("[ai_service] /api/chat returned 200 but message.content is empty")
-        else:
-            body = resp.text[:500]
-            print(f"[ai_service] /api/chat HTTP {resp.status_code}: {body}")
-    except Exception as exc:
-        print(f"[ai_service] /api/chat error ({type(exc).__name__}): {exc}")
-    return None
-
-
-async def _ollama_generate(prompt: str, json_mode: bool = False) -> str | None:
-    """Call Ollama /api/generate (raw completion)."""
-    try:
-        client = _get_ollama_client()
-        payload = {
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-        }
-        if json_mode:
-            payload["format"] = "json"
-        print(f"[ai_service] POST {OLLAMA_URL}/api/generate  model={OLLAMA_MODEL}  json_mode={json_mode}")
-        resp = await client.post(f"{OLLAMA_URL}/api/generate", json=payload)
-
-        if resp.status_code == 200:
-            text = resp.json().get("response", "").strip()
-            if text:
-                return text
-            print("[ai_service] /api/generate returned 200 but response field is empty")
-        else:
-            body = resp.text[:500]
-            print(f"[ai_service] /api/generate HTTP {resp.status_code}: {body}")
-    except Exception as exc:
-        print(f"[ai_service] /api/generate error ({type(exc).__name__}): {exc}")
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Gemini fallback
-# ---------------------------------------------------------------------------
-async def _try_gemini(prompt: str) -> str | None:
-    """Run Gemini in a thread executor so it doesn't block the event loop."""
-    if not GEMINI_API_KEY:
-        print("[ai_service] Gemini skipped — no GEMINI_API_KEY configured")
-        return None
-    try:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, _gemini_sync, prompt)
-    except Exception as exc:
-        print(f"[ai_service] Gemini error ({type(exc).__name__}): {exc}")
-    return None
-
-
-def _gemini_sync(prompt: str) -> str:
-    """Synchronous Gemini call — executed inside run_in_executor."""
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
-    )
-    return response.text.strip()
-
-
-# ---------------------------------------------------------------------------
-# JSON extraction helper — handles markdown fences and stray text
-# ---------------------------------------------------------------------------
-def extract_json(text: str):
-    """Parse JSON from *text*, stripping markdown fences and surrounding text."""
+def extract_json(text: str) -> Any:
+    """Parse JSON from text, handling markdown fences and common AI mistakes."""
     if not text or not text.strip():
         raise ValueError("Empty text — no JSON to extract")
 
     cleaned = text.strip()
 
-    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+    # Strip markdown code fences
     fence_match = re.search(r"```(?:json|JSON)?\s*\n?(.*?)\n?\s*```", cleaned, re.DOTALL)
     if fence_match:
         cleaned = fence_match.group(1).strip()
     else:
-        # Try to find the outermost JSON object or array
+        # Find outermost JSON object or array
         first_brace = None
         for i, ch in enumerate(cleaned):
             if ch in ('{', '['):
@@ -241,74 +110,427 @@ def extract_json(text: str):
     except json.JSONDecodeError:
         pass
 
-    # Attempt 2: fix trailing commas (common AI mistake)
+    # Attempt 2: fix trailing commas
     fixed = re.sub(r',(\s*[}\]])', r'\1', cleaned)
     try:
         return json.loads(fixed)
     except json.JSONDecodeError:
         pass
 
-    # Attempt 3: strip stray control characters and retry
+    # Attempt 3: strip control characters
     fixed = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', fixed)
     try:
         return json.loads(fixed)
     except json.JSONDecodeError:
         pass
 
-    # Attempt 4: fix unescaped newlines inside JSON string values
+    # Attempt 4: fix unescaped newlines inside strings
     fixed = re.sub(r'(?<=["])((?:[^"\\]|\\.)*)(?=[":])',
                    lambda m: m.group(0).replace('\n', '\\n'), fixed)
     try:
         return json.loads(fixed)
     except json.JSONDecodeError as exc:
-        # Log the FULL raw text so the root cause is always visible
-        print(f"[extract_json] all parse attempts failed: {exc}")
-        print(f"[extract_json] FULL raw text ({len(text)} chars):\n{text}")
-        print(f"[extract_json] FULL cleaned text ({len(fixed)} chars):\n{fixed}")
+        print(f"[extract_json] All parse attempts failed: {exc}")
+        print(f"[extract_json] Raw text ({len(text)} chars): {text[:500]}")
         raise
 
 
 # ---------------------------------------------------------------------------
-# Filler word constants
+# Response Validator
 # ---------------------------------------------------------------------------
-FILLER_WORDS_SINGLE: set[str] = {
+def validate_response(result: Dict, required_keys: list = None) -> bool:
+    """Validate that the response contains expected structure."""
+    if not isinstance(result, dict):
+        return False
+    
+    if required_keys is None:
+        required_keys = ["answers", "overall_feedback", "aggregate"]
+    
+    for key in required_keys:
+        if key not in result:
+            return False
+    
+    # Validate answers is a list
+    if not isinstance(result.get("answers"), list):
+        return False
+    
+    # Validate each answer has required fields
+    for answer in result.get("answers", []):
+        if not isinstance(answer, dict):
+            return False
+        if "score" not in answer or "feedback" not in answer:
+            return False
+    
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Default Fallback Response
+# ---------------------------------------------------------------------------
+def get_fallback_response(num_questions: int = 5) -> Dict:
+    """Return a valid fallback response when AI fails."""
+    return {
+        "answers": [
+            {
+                "score": 50,
+                "feedback": "AI evaluation service temporarily unavailable. Please retry the interview for detailed feedback.",
+                "strengths": ["Answer recorded successfully"],
+                "improvements": ["Retry interview when service is available"]
+            }
+            for _ in range(num_questions)
+        ],
+        "overall_feedback": "Evaluation service temporarily unavailable. Please retry the interview to receive comprehensive feedback on your responses.",
+        "aggregate": {
+            "technical_score": 50,
+            "communication_score": 50,
+            "overall_score": 50
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
+# Ollama Implementation
+# ---------------------------------------------------------------------------
+async def _try_ollama_with_retry(prompt: str, json_mode: bool = False) -> Optional[str]:
+    """Try Ollama with retry logic."""
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            # Try chat endpoint first
+            text = await _ollama_chat(prompt, json_mode)
+            if text:
+                print(f"[ollama] Chat attempt {attempt + 1} succeeded")
+                return text
+            
+            # Try generate endpoint
+            text = await _ollama_generate(prompt, json_mode)
+            if text:
+                print(f"[ollama] Generate attempt {attempt + 1} succeeded")
+                return text
+                
+        except httpx.ReadTimeout:
+            print(f"[ollama] ReadTimeout on attempt {attempt + 1}/{MAX_RETRIES}")
+        except Exception as e:
+            print(f"[ollama] Error on attempt {attempt + 1}: {type(e).__name__}: {e}")
+        
+        if attempt < MAX_RETRIES - 1:
+            print(f"[ollama] Retrying in {RETRY_DELAY_SECONDS}s...")
+            await asyncio.sleep(RETRY_DELAY_SECONDS)
+    
+    return None
+
+
+async def _ollama_chat(prompt: str, json_mode: bool = False) -> Optional[str]:
+    """Call Ollama /api/chat endpoint."""
+    try:
+        client = _get_ollama_client()
+        system_msg = (
+            "You are a helpful AI assistant. You MUST respond with valid JSON only. "
+            "No markdown fences, no explanation before or after the JSON."
+        ) if json_mode else "You are a helpful AI assistant."
+        
+        payload = {
+            "model": OLLAMA_MODEL,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+        }
+        if json_mode:
+            payload["format"] = "json"
+        
+        start_time = time.time()
+        resp = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+        latency = time.time() - start_time
+        print(f"[ollama] /api/chat latency: {latency:.2f}s")
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            text = (data.get("message", {}).get("content", "")).strip()
+            if text:
+                return text
+            print("[ollama] /api/chat returned 200 but empty content")
+        else:
+            print(f"[ollama] /api/chat HTTP {resp.status_code}: {resp.text[:200]}")
+    except httpx.ReadTimeout:
+        print("[ollama] /api/chat ReadTimeout")
+        raise
+    except Exception as e:
+        print(f"[ollama] /api/chat error: {type(e).__name__}: {e}")
+    return None
+
+
+async def _ollama_generate(prompt: str, json_mode: bool = False) -> Optional[str]:
+    """Call Ollama /api/generate endpoint."""
+    try:
+        client = _get_ollama_client()
+        payload = {
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+        }
+        if json_mode:
+            payload["format"] = "json"
+        
+        start_time = time.time()
+        resp = await client.post(f"{OLLAMA_URL}/api/generate", json=payload)
+        latency = time.time() - start_time
+        print(f"[ollama] /api/generate latency: {latency:.2f}s")
+        
+        if resp.status_code == 200:
+            text = resp.json().get("response", "").strip()
+            if text:
+                return text
+            print("[ollama] /api/generate returned 200 but empty response")
+        else:
+            print(f"[ollama] /api/generate HTTP {resp.status_code}: {resp.text[:200]}")
+    except httpx.ReadTimeout:
+        print("[ollama] /api/generate ReadTimeout")
+        raise
+    except Exception as e:
+        print(f"[ollama] /api/generate error: {type(e).__name__}: {e}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Gemini Implementation (Fixed for new SDK)
+# ---------------------------------------------------------------------------
+async def _try_gemini(prompt: str) -> Optional[str]:
+    """Run Gemini with retry logic."""
+    if not GEMINI_API_KEY:
+        print("[gemini] No GEMINI_API_KEY configured")
+        return None
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            result = await _gemini_async(prompt)
+            if result:
+                print(f"[gemini] Attempt {attempt + 1} succeeded")
+                return result
+        except Exception as e:
+            print(f"[gemini] Error on attempt {attempt + 1}: {type(e).__name__}: {e}")
+        
+        if attempt < MAX_RETRIES - 1:
+            print(f"[gemini] Retrying in {RETRY_DELAY_SECONDS}s...")
+            await asyncio.sleep(RETRY_DELAY_SECONDS)
+    
+    return None
+
+
+async def _gemini_async(prompt: str) -> str:
+    """Execute Gemini call asynchronously."""
+    def _call_gemini():
+        # Configure the API
+        genai.configure(api_key=GEMINI_API_KEY)
+        
+        # Use the correct model name
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        start_time = time.time()
+        response = model.generate_content(prompt)
+        latency = time.time() - start_time
+        print(f"[gemini] latency: {latency:.2f}s")
+        
+        return response.text.strip()
+    
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _call_gemini)
+    except Exception as e:
+        print(f"[gemini] Async error: {type(e).__name__}: {e}")
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Main Content Generation
+# ---------------------------------------------------------------------------
+async def generate_content(
+    prompt: str,
+    *,
+    use_cache: bool = True,
+    json_mode: bool = False
+) -> str:
+    """Send prompt to AI and return text response with fallback."""
+    
+    # Check cache
+    if use_cache:
+        cached = _cache_get(prompt)
+        if cached is not None:
+            print("[ai_service] Returning cached response")
+            return cached
+    
+    # Try Ollama first
+    print(f"[ai_service] Trying Ollama (model: {OLLAMA_MODEL})...")
+    result = await _try_ollama_with_retry(prompt, json_mode=json_mode)
+    
+    # Fallback to Gemini
+    if not result:
+        print("[ai_service] Ollama failed, trying Gemini...")
+        result = await _try_gemini(prompt)
+    
+    # If all failed, return empty
+    if not result:
+        print("[ai_service] WARNING: All AI backends failed")
+        return ""
+    
+    # Log preview
+    preview = result[:300].replace("\n", " ")
+    print(f"[ai_service] Response preview ({len(result)} chars): {preview}")
+    
+    # Cache the result
+    if use_cache:
+        _cache_set(prompt, result)
+    
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Evaluate Content - Main function for interview evaluation
+# ---------------------------------------------------------------------------
+async def evaluate_content(
+    role: str,
+    level: str,
+    questions_answers: list
+) -> Dict:
+    """Evaluate interview content and return structured analysis."""
+    from prompts import content_analysis_prompt
+    
+    num_questions = len(questions_answers)
+    prompt = content_analysis_prompt(role, level, questions_answers)
+    
+    # Try to get AI response
+    raw = await generate_content(prompt, use_cache=False, json_mode=True)
+    
+    print(f"[evaluate_content] Raw response length: {len(raw) if raw else 0}")
+    
+    # Try to parse and validate
+    if raw and raw.strip():
+        try:
+            result = extract_json(raw)
+            print(f"[evaluate_content] Parsed JSON keys: {list(result.keys()) if isinstance(result, dict) else type(result)}")
+            
+            if isinstance(result, dict):
+                # Try multiple times with retry for valid structure
+                for retry in range(2):
+                    if validate_response(result):
+                        # Normalize the response
+                        result = _normalize_response(result, num_questions)
+                        return result
+                    else:
+                        print(f"[evaluate_content] Response validation failed, attempt {retry + 1}")
+                        # Try one more time with different prompt or just return what we have
+                        if retry == 0:
+                            # Try to extract answers from different key formats
+                            result = _normalize_response(result, num_questions)
+                
+                # If still not valid, use fallback
+                if not validate_response(result):
+                    print("[evaluate_content] Using fallback - invalid structure")
+                    return get_fallback_response(num_questions)
+                
+                return result
+                
+        except Exception as e:
+            print(f"[evaluate_content] Parse error: {e}")
+    
+    # Return fallback
+    print("[evaluate_content] Using fallback - no valid response")
+    return get_fallback_response(num_questions)
+
+
+def _normalize_response(result: Dict, num_questions: int) -> Dict:
+    """Normalize response to expected format."""
+    
+    # Find answers from various possible keys
+    answers = None
+    for key in ["answers", "feedback_per_question", "evaluations", "results", "response"]:
+        if key in result and isinstance(result[key], list):
+            answers = result[key]
+            break
+    
+    # Ensure we have answers for all questions
+    if answers is None:
+        answers = []
+    elif len(answers) < num_questions:
+        # Pad with default entries
+        while len(answers) < num_questions:
+            answers.append({
+                "score": 50,
+                "feedback": "Additional feedback pending.",
+                "strengths": [],
+                "improvements": []
+            })
+    
+    # Ensure each answer has required fields
+    normalized_answers = []
+    for i, ans in enumerate(answers[:num_questions]):
+        if isinstance(ans, dict):
+            normalized_answers.append({
+                "score": ans.get("score", 50),
+                "feedback": ans.get("feedback", ans.get("comment", "Feedback unavailable.")),
+                "strengths": ans.get("strengths", ans.get("strength", [])),
+                "improvements": ans.get("improvements", ans.get("improvements", []))
+            })
+        else:
+            normalized_answers.append({
+                "score": 50,
+                "feedback": str(ans) if ans else "Feedback unavailable.",
+                "strengths": [],
+                "improvements": []
+            })
+    
+    # Get aggregate scores
+    aggregate = result.get("aggregate", result.get("scores", {}))
+    if not isinstance(aggregate, dict):
+        aggregate = {}
+    
+    # Ensure aggregate has required fields
+    normalized_aggregate = {
+        "technical_score": aggregate.get("technical_score", aggregate.get("technical", 50)),
+        "communication_score": aggregate.get("communication_score", aggregate.get("communication", 50)),
+        "overall_score": aggregate.get("overall_score", aggregate.get("overall", 50))
+    }
+    
+    # Get overall feedback
+    overall_feedback = result.get("overall_feedback", result.get("summary", ""))
+    if not overall_feedback:
+        overall_feedback = "Evaluation completed. Please review individual answer feedback above."
+    
+    return {
+        "answers": normalized_answers,
+        "overall_feedback": overall_feedback,
+        "aggregate": normalized_aggregate
+    }
+
+
+# ---------------------------------------------------------------------------
+# Speech Analysis
+# ---------------------------------------------------------------------------
+FILLER_WORDS_SINGLE: set = {
     "um", "uh", "like", "so", "well", "actually", "basically",
     "literally", "totally", "right", "anyway", "okay",
 }
-MULTI_WORD_FILLERS: list[str] = ["you know", "i mean", "kind of", "sort of"]
+MULTI_WORD_FILLERS: list = ["you know", "i mean", "kind of", "sort of"]
 
 
-# ---------------------------------------------------------------------------
-# FEATURE 2 — Speech Delivery Analysis
-# ---------------------------------------------------------------------------
 def analyze_speech_delivery(answer: str, duration_seconds: float) -> dict:
-    """Analyse speech delivery from transcript text and duration.
-
-    Returns a dict with speaking_pace_wpm, filler_word_count,
-    filler_words_found, clarity_score (0-100), engagement_score (0-100),
-    word_count, sentence_count, avg_words_per_sentence.
-    """
+    """Analyze speech delivery metrics."""
     if not answer or not answer.strip():
         return {
-            "word_count": 0,
-            "duration_seconds": round(duration_seconds, 1),
-            "speaking_pace_wpm": 0.0,
-            "filler_word_count": 0,
-            "filler_words_found": [],
-            "clarity_score": 0,
-            "engagement_score": 0,
-            "sentence_count": 0,
+            "word_count": 0, "duration_seconds": round(duration_seconds, 1),
+            "speaking_pace_wpm": 0.0, "filler_word_count": 0,
+            "filler_words_found": [], "clarity_score": 0,
+            "engagement_score": 0, "sentence_count": 0,
             "avg_words_per_sentence": 0.0,
         }
 
     words = answer.split()
     word_count = len(words)
     duration_minutes = max(duration_seconds / 60.0, 0.01)
-
-    # --- Speaking Pace (WPM) ---
     wpm = word_count / duration_minutes
 
-    # --- Filler Detection ---
+    # Filler detection
     cleaned_words = [w.lower().strip(".,!?;:'\"") for w in words]
     single_hits = [w for w in cleaned_words if w in FILLER_WORDS_SINGLE]
     lower_text = answer.lower()
@@ -316,40 +538,35 @@ def analyze_speech_delivery(answer: str, duration_seconds: float) -> dict:
     filler_count = len(single_hits) + multi_count
     filler_rate = filler_count / max(word_count, 1)
 
-    # --- Sentence Analysis ---
+    # Sentence analysis
     sentences = re.split(r'[.!?]+', answer)
     sentences = [s.strip() for s in sentences if s.strip()]
     sentence_count = max(len(sentences), 1)
     sentence_lengths = [len(s.split()) for s in sentences]
     avg_wps = word_count / sentence_count
 
-    # --- Clarity Score (0-100) ---
+    # Clarity score
     clarity = 80.0
-    # Filler penalty (10 % fillers ≈ −15 pts)
     clarity -= filler_rate * 150
-    # Sentence length: optimal 10–25 words
     if avg_wps > 30:
         clarity -= (avg_wps - 30) * 1.0
     elif avg_wps < 6:
         clarity -= (6 - avg_wps) * 3.0
-    # Very short answers lack clarity context
     if word_count < 15:
         clarity -= 25
     elif word_count < 30:
         clarity -= 10
-    # Speaking pace: too fast or too slow
     if wpm > 200:
         clarity -= (wpm - 200) * 0.15
     elif wpm < 80 and word_count > 10:
         clarity -= (80 - wpm) * 0.2
     clarity = max(0, min(100, round(clarity)))
 
-    # --- Engagement Score (0-100) ---
-    # Vocabulary richness (unique non-filler words / total)
+    # Engagement score
     unique_words = set(cleaned_words) - FILLER_WORDS_SINGLE
     unique_ratio = len(unique_words) / max(word_count, 1)
     vocab_score = min(40.0, unique_ratio * 60)
-    # Sentence length variation
+    
     if len(sentence_lengths) > 1:
         try:
             length_std = statistics.stdev(sentence_lengths)
@@ -358,7 +575,7 @@ def analyze_speech_delivery(answer: str, duration_seconds: float) -> dict:
         variation_score = min(30.0, length_std * 3)
     else:
         variation_score = 5.0
-    # Answer substantiveness
+    
     if word_count > 80:
         substance_score = 30.0
     elif word_count > 40:
@@ -367,6 +584,7 @@ def analyze_speech_delivery(answer: str, duration_seconds: float) -> dict:
         substance_score = 12.0
     else:
         substance_score = 5.0
+    
     engagement = max(0, min(100, round(vocab_score + variation_score + substance_score)))
 
     return {
@@ -383,10 +601,10 @@ def analyze_speech_delivery(answer: str, duration_seconds: float) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# FEATURE 4 — Confidence Score
+# Confidence Score
 # ---------------------------------------------------------------------------
-def compute_confidence_score(speech_analyses: list[dict]) -> int:
-    """Estimate confidence (0-100) from aggregated speech metrics."""
+def compute_confidence_score(speech_analyses: list) -> int:
+    """Estimate confidence from speech metrics."""
     if not speech_analyses:
         return 0
 
@@ -423,21 +641,16 @@ def compute_confidence_score(speech_analyses: list[dict]) -> int:
 
 
 # ---------------------------------------------------------------------------
-# FEATURE 6 — Overall Score & Recruiter Verdict
+# Overall Score & Verdict
 # ---------------------------------------------------------------------------
-def compute_overall_score(
-    content_avg: float, clarity_avg: float, engagement_avg: float
-) -> float:
-    """Weighted overall interview score (0-100).
-
-    Formula: 0.5 * content + 0.3 * clarity + 0.2 * engagement
-    """
+def compute_overall_score(content_avg: float, clarity_avg: float, engagement_avg: float) -> float:
+    """Weighted overall interview score."""
     score = 0.5 * content_avg + 0.3 * clarity_avg + 0.2 * engagement_avg
     return round(max(0.0, min(100.0, score)), 1)
 
 
 def compute_recruiter_verdict(overall_score: float, role: str) -> dict:
-    """Determine hire recommendation and suggest suitable roles."""
+    """Determine hire recommendation."""
     if overall_score >= 70:
         recommendation = "SHORTLISTED"
     elif overall_score >= 50:
@@ -453,10 +666,7 @@ def compute_recruiter_verdict(overall_score: float, role: str) -> dict:
     else:
         suitable_roles = [f"Trainee {base}", f"Intern {base}"]
 
-    if overall_score >= 75 or overall_score < 35:
-        confidence_level = "High"
-    else:
-        confidence_level = "Medium"
+    confidence_level = "High" if overall_score >= 75 or overall_score < 35 else "Medium"
 
     return {
         "recommendation": recommendation,
@@ -466,88 +676,31 @@ def compute_recruiter_verdict(overall_score: float, role: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# FEATURE 3 — Content Evaluation via LLM
-# ---------------------------------------------------------------------------
-async def evaluate_content(
-    role: str, level: str, questions_answers: list[dict]
-) -> dict:
-    """Evaluate interview content using LLM and return structured analysis.
-
-    Returns a dict with ``answers`` (list of per-question dicts each containing
-    ``score`` and ``feedback``), ``overall_feedback``, and ``aggregate``.
-    """
-    from prompts import content_analysis_prompt
-
-    prompt = content_analysis_prompt(role, level, questions_answers)
-    raw = await generate_content(prompt, use_cache=False, json_mode=True)
-
-    if not raw or not raw.strip():
-        print("[evaluate_content] AI returned empty response — using fallback")
-    else:
-        try:
-            result = extract_json(raw)
-            if isinstance(result, dict):
-                # Normalise: accept variant top-level keys → "answers"
-                for alt in ("feedback_per_question", "evaluations", "results"):
-                    if alt in result and "answers" not in result:
-                        result["answers"] = result.pop(alt)
-                        break
-                return result
-            print(f"[evaluate_content] parsed JSON is {type(result).__name__}, expected dict")
-        except Exception as exc:
-            print(f"[evaluate_content] JSON parse error: {exc}")
-
-    # Fallback — single-paragraph feedback per question
-    return {
-        "answers": [
-            {
-                "score": 50,
-                "feedback": (
-                    "AI evaluation could not be parsed. Please try again. "
-                    "Your answer was recorded but automatic feedback is unavailable."
-                ),
-            }
-            for _ in questions_answers
-        ],
-        "overall_feedback": "Evaluation could not be completed. Please retry the interview.",
-        "aggregate": {
-            "relevance_score": 50,
-            "depth_score": 50,
-            "star_method_score": 30,
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
-# FEATURE 5 — Performance Summary via LLM
+# Performance Summary
 # ---------------------------------------------------------------------------
 async def generate_performance_summary(report_data: dict) -> str:
-    """Generate an executive performance summary using LLM."""
+    """Generate executive performance summary."""
     from prompts import performance_summary_prompt
-
+    
     prompt = performance_summary_prompt(report_data)
     raw = await generate_content(prompt, use_cache=False)
-
+    
     if raw and raw.strip():
         cleaned = raw.strip()
-        # Strip markdown code fences if the model wrapped its response
         fence = re.search(r"```(?:\w+)?\s*\n?(.*?)\n?\s*```", cleaned, re.DOTALL)
         if fence:
             cleaned = fence.group(1).strip()
         return cleaned
-
-    return (
-        "Performance summary could not be generated. "
-        "Please review the detailed metrics below."
-    )
+    
+    return "Performance summary could not be generated. Please review the detailed metrics below."
 
 
-# --------------------------------------------------------------------------- 
-# Evaluate answers using AI (legacy helper)
 # ---------------------------------------------------------------------------
-async def evaluate_answers(role: str, questions_answers: list[dict]) -> dict:
-    """Evaluate interview answers using AI and return structured feedback."""
-    from prompts import batch_evaluation_prompt  # Import here to avoid circular import
+# Legacy evaluate_answers function
+# ---------------------------------------------------------------------------
+async def evaluate_answers(role: str, questions_answers: list) -> dict:
+    """Legacy helper for batch evaluation."""
+    from prompts import batch_evaluation_prompt
     
     prompt = batch_evaluation_prompt(role, questions_answers)
     raw = await generate_content(prompt, use_cache=False)
@@ -556,7 +709,6 @@ async def evaluate_answers(role: str, questions_answers: list[dict]) -> dict:
         evaluation = extract_json(raw)
         return evaluation
     except Exception:
-        # Fallback similar to main.py
         return {
             "feedback_per_question": [
                 {
@@ -569,8 +721,8 @@ async def evaluate_answers(role: str, questions_answers: list[dict]) -> dict:
             ],
             "improvement_tips": [
                 "Practice structuring your answers with concrete examples.",
-                "Use the STAR method (Situation, Task, Action, Result) for behavioral questions.",
-                "Research the company and role thoroughly before interviews.",
+                "Use the STAR method for behavioral questions.",
+                "Research the company and role thoroughly.",
             ],
-            "learning_resources": [{"topic": "Interview Preparation", "resource": "Practice common behavioral and technical questions for your role."}],
+            "learning_resources": [{"topic": "Interview Preparation", "resource": "Practice common questions for your role."}],
         }

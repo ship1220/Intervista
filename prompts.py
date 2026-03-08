@@ -161,8 +161,7 @@ IMPORTANT: Return ONLY valid JSON. No text before or after the JSON.
 def content_analysis_prompt(role: str, level: str, questions_answers: list[dict]) -> str:
     """Prompt for detailed content evaluation of interview answers.
 
-    Returns a prompt that asks the LLM for a single combined feedback
-    paragraph per question (strengths + weaknesses + improved approach).
+    Returns a prompt that asks the LLM for a structured evaluation.
     """
     qa_block = ""
     for i, item in enumerate(questions_answers, 1):
@@ -170,35 +169,37 @@ def content_analysis_prompt(role: str, level: str, questions_answers: list[dict]
 
     return f"""You are a senior technical recruiter evaluating a candidate for {role} at the {level} level.
 
-Evaluate each question-answer pair below.
+Evaluate EACH of the {len(questions_answers)} question-answer pairs below. You MUST provide feedback for EVERY single question.
 
 For EACH answer provide:
 - "score": integer 0-100 based on correctness, depth, relevance, and structure
-- "feedback": ONE detailed paragraph that contains what the candidate did well, what needs improvement, and what a stronger answer would look like. Do NOT split into separate strengths/weaknesses fields.
+- "feedback": detailed paragraph with strengths, weaknesses, and improved approach
+- "strengths": list of specific strengths in the answer
+- "improvements": list of specific areas for improvement
 
 Also provide:
-- "overall_feedback": a 4-6 sentence professional summary of the candidate's overall performance, communication, and areas for improvement. Write in third person.
-- "aggregate": object with relevance_score, depth_score, star_method_score (each 0-100)
+- "overall_feedback": 4-6 sentence professional summary
+- "aggregate": technical_score, communication_score, overall_score (each 0-100)
 
 Interview responses:
 {qa_block}
 
-You MUST return ONLY valid JSON. No markdown fences. No text before or after the JSON object.
+IMPORTANT: Return ONLY valid JSON. No markdown fences. No text before or after.
 
 {{
-  "feedback_per_question": [
+  "answers": [
     {{
-      "question": "the exact question text",
-      "candidate_answer": "the candidate's answer",
-      "score": 65,
-      "feedback": "Your answer showed a basic understanding of X, which is a good start. However, the explanation lacked specific technical details about Y and Z. A stronger answer would clearly describe the architecture, technologies used, and concrete results achieved."
+      "score": 75,
+      "feedback": "The answer demonstrated good understanding...",
+      "strengths": ["Specific strength 1", "Specific strength 2"],
+      "improvements": ["Could add more detail about X", "Consider Y"]
     }}
   ],
-  "overall_feedback": "The candidate demonstrated ... Areas for improvement include ...",
+  "overall_feedback": "The candidate demonstrated... Overall performance was...",
   "aggregate": {{
-    "relevance_score": 65,
-    "depth_score": 60,
-    "star_method_score": 50
+    "technical_score": 70,
+    "communication_score": 80,
+    "overall_score": 75
   }}
 }}"""
 

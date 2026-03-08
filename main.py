@@ -237,15 +237,38 @@ async def api_interview_questions(request: Request, role: str, level: str, count
     resume_text = resume_store.get(user.username, "")
     if resume_text:
         prompt = interview_questions_with_resume_prompt(role, level, resume_text, count)
+        print("i reached here")
     else:
         prompt = interview_questions_prompt(role, level, count)
     raw = await generate_content(prompt, use_cache=False, json_mode=True)
+    print(f"[questions] Raw Ollama response: {raw[:300]}...")
 
     try:
-        questions = extract_json(raw)
+        questions_data = extract_json(raw)
+        print(f"[questions] Extracted data type: {type(questions_data)}, keys: {list(questions_data.keys()) if isinstance(questions_data, dict) else 'N/A'}")
+        
+        # Handle both direct array and {"questions": [...]} formats
+        if isinstance(questions_data, list):
+            questions = questions_data
+        elif isinstance(questions_data, dict):
+            # Ollama might return {"questions": ["Q1", "Q2", ...]}
+            if "questions" in questions_data:
+                questions = questions_data["questions"]
+            elif "question" in questions_data:
+                questions = questions_data["question"]
+            else:
+                # Try to find any key that contains a list of strings
+                for key in questions_data:
+                    if isinstance(questions_data[key], list):
+                        questions = questions_data[key]
+                        break
+        
         if not isinstance(questions, list):
             raise ValueError("Expected a list")
-    except Exception:
+            
+        print(f"[questions] Extracted {len(questions)} questions")
+    except Exception as e:
+        print(f"[questions] Extraction error: {e}")
         # Fallback: split by newlines and clean up
         questions = [q.strip().lstrip("0123456789.)- ") for q in raw.strip().split("\n") if q.strip()]
         questions = [q for q in questions if q.endswith("?")][:count]
@@ -288,6 +311,10 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         if not questions_answers:
             raise HTTPException(status_code=400, detail="No questions_answers provided")
 
+        print(f"[evaluate] Received {len(questions_answers)} question-answer pairs")
+        for i, qa in enumerate(questions_answers):
+            print(f"[evaluate] Q{i+1}: {qa.get('question', 'MISSING')[:50]}...")
+
         session = interview_sessions.get(user.username, {})
         role = body.get("role", session.get("role", "Software Developer"))
         level = body.get("level", session.get("level", "mid"))
@@ -322,11 +349,18 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
 
         # -- FEATURE 3: Content Analysis (LLM) ------------------------
         content_result = await evaluate_content(role, level, questions_answers)
+        print(f"[evaluate] content_result keys: {list(content_result.keys())}")
         content_answers = content_result.get("answers", [])
+        print(f"[evaluate] content_answers count: {len(content_answers)}")
         aggregate = content_result.get("aggregate", {})
 
         content_scores = [a.get("score", 50) for a in content_answers]
         content_avg = sum(content_scores) / max(len(content_scores), 1)
+        
+        # Support both old and new aggregate formats
+        technical_score = aggregate.get("technical_score", aggregate.get("relevance_score", content_avg))
+        communication_score = aggregate.get("communication_score", aggregate.get("depth_score", content_avg))
+        overall_ai_score = aggregate.get("overall_score", content_avg)
 
         # -- FEATURE 6: Overall Score & Verdict ------------------------
         overall = compute_overall_score(content_avg, avg_clarity, avg_engagement)
@@ -348,11 +382,24 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         for i, qa in enumerate(questions_answers):
             ca = content_answers[i] if i < len(content_answers) else {}
             sa = speech_analyses[i] if i < len(speech_analyses) else {}
-        detailed_answers.append({
-                "question": qa.get("question", ""),
-                "transcript": qa.get("answer", ""),
+            
+            # Ensure question text is from the input, not from AI response
+            question_text = qa.get("question", "")
+            answer_text = qa.get("answer", "")
+            
+            # Get feedback from AI response, or use default if missing
+            feedback_text = ca.get("feedback", "")
+            if not feedback_text:
+                feedback_text = "Feedback is being generated. Please check back later."
+            
+            print(f"[evaluate] Question {i+1}: {question_text[:50]}...")
+            print(f"[evaluate]   Feedback: {feedback_text[:50] if feedback_text else 'MISSING'}...")
+            
+            detailed_answers.append({
+                "question": question_text,
+                "transcript": answer_text,
                 "score": ca.get("score", 50),
-                "feedback": ca.get("feedback", ""),
+                "feedback": feedback_text,
                 "voice_metrics": {
                     "speaking_pace_wpm": sa.get("speaking_pace_wpm", 0),
                     "filler_count": sa.get("filler_word_count", 0),
@@ -379,8 +426,12 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
             },
             "content_analysis": {
                 "average_score": round(content_avg),
-                "relevance_score": aggregate.get("relevance_score", round(content_avg)),
-                "depth_score": aggregate.get("depth_score", round(content_avg * 0.9)),
+                "technical_score": technical_score,
+                "communication_score": communication_score,
+                "overall_ai_score": overall_ai_score,
+                # Legacy keys for compatibility
+                "relevance_score": aggregate.get("relevance_score", technical_score),
+                "depth_score": aggregate.get("depth_score", communication_score),
                 "star_method_score": aggregate.get("star_method_score", round(content_avg * 0.7)),
             },
             "detailed_answers": detailed_answers,
