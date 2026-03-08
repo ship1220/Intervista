@@ -151,15 +151,27 @@ def content_analysis_prompt(role: str, level: str, questions_answers: list[dict]
     qa_block = ""
     for i, item in enumerate(questions_answers, 1):
         q = item['question'][:150]
-        a = item['answer'][:200]
+        a = item['answer'][:800]
         qa_block += f"\nQ{i}: {q}\nA{i}: {a}\n"
 
-    return f"""Evaluate these {len(questions_answers)} interview answers for a {level} {role}.
-For each provide: score (0-100), feedback (2-3 sentences), strengths (1-2 sentences on what was good), weaknesses (1-2 sentences on gaps), ideal_answer (3-4 sentence example of a strong answer for this question).
-Score fairly—brief but correct answers get 55-65.
+    return f"""You are a fair and experienced technical interviewer evaluating {len(questions_answers)} answers for a {level} {role} position.
+
+SCORING RUBRIC (use the FULL range):
+- 90-100: Excellent — accurate, comprehensive, demonstrates deep understanding
+- 70-89: Mostly correct — covers key concepts with minor gaps
+- 50-69: Partial — some correct ideas but incomplete or vague
+- 30-49: Weak — shows minimal understanding, major gaps
+- 0-29: Incorrect — wrong, off-topic, or empty answer
+
+IMPORTANT RULES:
+- Score based on CONCEPTUAL correctness, not exact wording. An answer phrased differently but conveying the right idea should score high.
+- Accept alternative correct explanations. There are many valid ways to explain a concept.
+- A brief but accurate answer deserves 60-75. A detailed and accurate answer deserves 80-100.
+- An empty or irrelevant answer must score 0-15.
+- Each answer MUST have at least 1 item in "strengths" and at least 1 item in "improvements".
 {qa_block}
-Return ONLY valid JSON:
-{{"answers":[{{"score":75,"feedback":"...","strengths":"...","weaknesses":"...","ideal_answer":"..."}}],"overall_feedback":"...","aggregate":{{"relevance_score":70,"depth_score":65,"star_method_score":50}}}}"""
+Return ONLY valid JSON, no extra text:
+{{"answers":[{{"score":75,"feedback":"2-3 sentence evaluation.","strengths":["specific strength 1"],"improvements":["specific actionable improvement 1"]}}],"overall_feedback":"2-3 sentence summary of candidate performance.","aggregate":{{"technical_score":70,"communication_score":65,"overall_score":68}}}}"""
 
 
 def performance_summary_prompt(report_data: dict) -> str:
@@ -173,7 +185,7 @@ def performance_summary_prompt(report_data: dict) -> str:
     return f"""Write a 4-sentence professional interview performance summary.
 Role: {profile.get('role', 'Unknown')} ({profile.get('level', 'Unknown')}), Score: {report_data.get('overall_score', 0)}/100, Verdict: {verdict.get('recommendation', 'N/A')}
 Voice: {voice.get('speaking_pace_wpm', 0)} WPM, {voice.get('total_filler_words', 0)} fillers, clarity {voice.get('clarity_score', 0)}/100
-Content: avg {content.get('average_score', 0)}/100, relevance {content.get('relevance_score', 0)}, depth {content.get('depth_score', 0)}
+Content: avg {content.get('average_score', 0)}/100, technical {content.get('technical_score', 0)}, communication {content.get('communication_score', 0)}
 Cover: overall assessment, communication, technical knowledge, areas for improvement.
 Return ONLY the plain-text paragraph."""
 

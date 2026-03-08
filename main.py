@@ -400,9 +400,9 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
                 "transcript": answer_text,
                 "score": ca.get("score", 50),
                 "feedback": feedback_text,
-                "strengths": ca.get("strengths", ""),
-                "weaknesses": ca.get("weaknesses", ""),
-                "ideal_answer": ca.get("ideal_answer", ""),
+                "strengths": ca.get("strengths", ["Attempted the question."]),
+                "weaknesses": ca.get("weaknesses", ["No major weaknesses detected."]),
+                "ideal_answer": ca.get("ideal_answer", "No ideal answer generated."),
                 "voice_metrics": {
                     "speaking_pace_wpm": sa.get("speaking_pace_wpm", 0),
                     "filler_count": sa.get("filler_word_count", 0),
@@ -429,10 +429,12 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
             },
             "content_analysis": {
                 "average_score": round(content_avg),
-                "relevance_score": aggregate.get("relevance_score", round(content_avg)),
-                "depth_score": aggregate.get("depth_score", round(content_avg * 0.9)),
-                "star_method_score": aggregate.get("star_method_score", round(content_avg * 0.7)),
-            },
+
+                # values used by report.html
+                "relevance_score": aggregate.get("technical_score", round(content_avg)),
+                "depth_score": aggregate.get("communication_score", round(content_avg * 0.85)),
+                "star_method_score": aggregate.get("overall_score", round(content_avg)),
+             },
             "detailed_answers": detailed_answers,
             "session_metadata": {
                 "total_duration_seconds": round(total_duration, 1),

@@ -168,22 +168,26 @@ def validate_response(result: Dict, required_keys: list = None) -> bool:
         return False
     
     if required_keys is None:
-        required_keys = ["answers", "overall_feedback", "aggregate"]
+        required_keys = ["evaluations"]
     
     for key in required_keys:
         if key not in result:
             return False
     
-    # Validate answers is a list
-    if not isinstance(result.get("answers"), list):
+    # Validate evaluations list exists
+    if not isinstance(result.get("evaluations"), list):
         return False
     
-    # Validate each answer has required fields
-    for answer in result.get("answers", []):
+    # Validate each evaluation object
+    for answer in result.get("evaluations", []):
         if not isinstance(answer, dict):
             return False
-        if "score" not in answer or "feedback" not in answer:
-            return False
+    
+        required_fields = ["score", "feedback", "strengths", "weaknesses", "ideal_answer"]
+        
+        for field in required_fields:
+            if field not in answer:
+                return False
     
     return True
 
@@ -201,17 +205,17 @@ def get_fallback_response(num_questions: int = 5) -> Dict:
                     "AI evaluation service temporarily unavailable. "
                     "Your answer was recorded. Please retry for detailed feedback."
                 ),
-                "strengths": "",
-                "weaknesses": "",
-                "ideal_answer": "",
+                "strengths": ["Attempted the question."],
+                "weaknesses": ["Evaluation unavailable due to AI service issue."],
+                "ideal_answer": "Ideal answer could not be generated.",
             }
             for _ in range(num_questions)
         ],
         "overall_feedback": "Evaluation service temporarily unavailable. Please retry the interview.",
         "aggregate": {
             "relevance_score": 50,
-            "depth_score": 45,
-            "star_method_score": 30,
+            "depth_score": 50,
+            "star_method_score": 50,
         },
     }
 
@@ -421,10 +425,10 @@ async def evaluate_content(
     questions_answers: list
 ) -> Dict:
     """Evaluate interview content and return structured analysis."""
-    from prompts import content_analysis_prompt
+    from prompts import interview_evaluation_prompt
 
     num_questions = len(questions_answers)
-    prompt = content_analysis_prompt(role, level, questions_answers)
+    prompt = interview_evaluation_prompt(role, questions_answers)
 
     raw = await generate_content(prompt, use_cache=False, json_mode=True)
     print(f"[evaluate_content] Raw response length: {len(raw) if raw else 0}")
@@ -460,22 +464,25 @@ def _normalize_response(result: Dict, num_questions: int) -> Dict:
 
     # Normalize each answer entry
     normalized_answers = []
+    
     for i in range(num_questions):
         if i < len(answers) and isinstance(answers[i], dict):
             ans = answers[i]
+    
             normalized_answers.append({
                 "score": ans.get("score", 50),
                 "feedback": ans.get("feedback", ans.get("comment", "Feedback unavailable.")),
-                "strengths": ans.get("strengths", ""),
-                "weaknesses": ans.get("weaknesses", ""),
+                "strengths": ans.get("strengths", []),
+                "weaknesses": ans.get("weaknesses", []),
                 "ideal_answer": ans.get("ideal_answer", ""),
             })
+
         else:
             normalized_answers.append({
                 "score": 50,
                 "feedback": "Feedback unavailable for this question.",
-                "strengths": "",
-                "weaknesses": "",
+                "strengths": [],
+                "weaknesses": [],
                 "ideal_answer": "",
             })
 
@@ -515,11 +522,15 @@ def analyze_speech_delivery(answer: str, duration_seconds: float) -> dict:
     """Analyze speech delivery metrics."""
     if not answer or not answer.strip():
         return {
-            "word_count": 0, "duration_seconds": round(duration_seconds, 1),
-            "speaking_pace_wpm": 0.0, "filler_word_count": 0,
-            "filler_words_found": [], "clarity_score": 0,
-            "engagement_score": 0, "sentence_count": 0,
-            "avg_words_per_sentence": 0.0,
+           "word_count": 0,
+           "duration_seconds": round(duration_seconds, 1),
+           "speaking_pace_wpm": 0.0,
+           "filler_word_count": 0,
+           "filler_words_found": [],
+           "clarity_score": 0,
+           "engagement_score": 0,
+           "sentence_count": 0,
+           "avg_words_per_sentence": 0.0,
         }
 
     words = answer.split()
