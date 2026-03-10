@@ -130,7 +130,7 @@
           <strong style="font-size:.9rem;">Average Answer Score</strong>
           <div class="score-bar-wrap">
             <div class="score-bar">
-              <div class="score-bar-fill" style="width:{{ ca.average_score }}%;background:{% if ca.average_score >= 70 %}#10b981{% elif ca.average_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></div>
+              <div class="score-bar-fill" style="width:{{ ca.average_score | default(0) }}%;background:{% if ca.average_score  >= 70 %}#10b981{% elif ca.average_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></div>
             </div>
             <span class="score-bar-value">{{ ca.average_score }}</span>
           </div>
@@ -278,6 +278,6 @@
     </div>
 
   </main>
-
+  
 </body>
 </html>

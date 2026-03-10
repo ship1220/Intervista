@@ -8,7 +8,7 @@ import math
 import asyncio
 import statistics
 import httpx
-import google.generativeai as genai
+import google.genai as genai
 from dotenv import load_dotenv
 from typing import Optional, Dict, Any
 
