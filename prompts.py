@@ -192,28 +192,51 @@ Return ONLY the plain-text paragraph."""
 
 
 def interview_evaluation_prompt(role: str, questions_answers: list[dict]) -> str:
+
     qa_block = ""
     for i, item in enumerate(questions_answers, 1):
         qa_block += f"\nQ{i}: {item['question']}\nA{i}: {item['answer']}\n"
 
-    return f"""You are an expert interview evaluator for the role of {role}.
-Evaluate each question-answer pair below. Provide a score from 0-100, an ideal answer, strengths, weaknesses, and feedback for each.
+    return f"""
+You are a senior technical interviewer evaluating a candidate for a {role} role.
 
+Your job is to provide **constructive and educational feedback** that helps the candidate improve.
+
+For EACH answer provide:
+
+1. score (0-100)
+2. feedback (3-4 sentences explaining what was good and what was missing)
+3. strengths (2 specific positive points)
+4. weaknesses (2 specific problems with the answer)
+5. ideal_answer (a strong example answer showing how the candidate should respond)
+
+Important evaluation rules:
+- If the answer is vague, explain exactly what details are missing.
+- If the answer lacks examples, say what type of example should be added.
+- Suggest how the answer could be structured better.
+- Encourage the candidate but be honest.
+- Feedback must be detailed and actionable.
+
+Interview responses:
 {qa_block}
 
-IMPORTANT: Return ONLY valid JSON. Do NOT include any text before or after the JSON.
-Do NOT wrap the JSON in markdown code fences.
+Return ONLY valid JSON in this format:
 
 {{
-  "evaluations": [
-    {{
-      "question": "the exact question text",
-      "candidate_answer": "the candidate's answer",
-      "score": 85,
-      "ideal_answer": "A strong example answer that demonstrates key competencies",
-      "strengths": ["Specific strength 1", "Specific strength 2"],
-      "weaknesses": ["Specific weakness 1", "Specific weakness 2"],
-      "feedback": "2-3 sentences of constructive feedback"
-    }}
-  ]
-}}"""
+ "answers":[
+  {{
+   "score":70,
+   "feedback":"3-4 sentences explaining the quality of the answer and how it could be improved.",
+   "strengths":["specific positive point","another strength"],
+   "weaknesses":["specific problem","another problem"],
+   "ideal_answer":"A well-structured example answer demonstrating what a strong response would look like."
+  }}
+ ],
+ "overall_feedback":"3 sentence summary of the candidate's overall performance and key improvement areas.",
+ "aggregate":{{
+  "technical_score":70,
+  "communication_score":65,
+  "overall_score":68
+ }}
+}}
+"""

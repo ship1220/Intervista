@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
+from ai_service import transcribe_audio
 from sse_starlette.sse import EventSourceResponse
 
 from database import SessionLocal
@@ -210,6 +211,27 @@ async def upload_resume(request: Request, file: UploadFile = File(...), db: Sess
     print(f"[resume] Stored {len(text)} chars for user {user.username}")
     return {"status": "ok", "length": len(text), "preview": text[:200]}
 
+# ===========================================================================
+# AUDIO TRANSCRIPTION (Whisper)
+# ===========================================================================
+@app.post("/api/transcribe")
+async def transcribe_endpoint(file: UploadFile = File(...)):
+    """
+    Receive recorded audio from the frontend and convert it to text using Whisper.
+    """
+
+    audio_bytes = await file.read()
+
+    temp_path = "temp_audio_" + str(datetime.now().timestamp()) + ".wav"
+
+    # Save audio temporarily
+    with open(temp_path, "wb") as f:
+        f.write(audio_bytes)
+
+    # Run Whisper transcription
+    text = transcribe_audio(temp_path)
+
+    return {"transcript": text}
 # ===========================================================================
 # INTERVIEW — START (returns page for voice interview)
 # ===========================================================================

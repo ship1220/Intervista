@@ -4,6 +4,8 @@ import os
 import re
 import json
 import time
+import whisper
+import subprocess
 import math
 import asyncio
 import statistics
@@ -18,7 +20,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 groq_client = Groq(api_key=GROQ_API_KEY)
-
+# Whisper model (loaded once)
+whisper_model = whisper.load_model("base")
 # Configuration
 
 MAX_RETRIES = 1                 # single attempt — streaming eliminates timeout-based retries
@@ -130,7 +133,13 @@ async def _call_groq(prompt: str, json_mode=False) -> str:
         if json_mode:
             messages.append({
                 "role": "system",
-                "content": "Return valid JSON only. No explanation."
+                "content": (
+                     "You are a strict JSON generator. "
+                     "Return ONLY valid JSON. "
+                     "Do NOT add explanations. "
+                     "Do NOT add text before or after the JSON. "
+                     "Do NOT use markdown."
+                 )
             })
 
         messages.append({
@@ -141,7 +150,7 @@ async def _call_groq(prompt: str, json_mode=False) -> str:
         response = groq_client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
-            temperature=0.4 if json_mode else 0.7,
+            temperature=0,
         )
 
         content = response.choices[0].message.content
@@ -253,11 +262,36 @@ async def evaluate_content(role: str, level: str, questions_answers: list) -> Di
     raw = await generate_content(prompt, use_cache=False, json_mode=True)
 
     try:
-
         result = extract_json(raw)
 
-    except Exception:
+        # ---- NORMALIZE ANSWERS STRUCTURE ----
+        answers = result.get("answers")
 
+        # Case 1: answers is a dict like {"Q1": {...}, "Q2": {...}}
+        if isinstance(answers, dict):
+            answers = list(answers.values())
+
+        # Case 2: answers missing but Q1/Q2 keys exist
+        if not answers:
+            extracted = []
+            for key, value in result.items():
+                if key.lower().startswith("q") and isinstance(value, dict):
+                    extracted.append(value)
+
+            if extracted:
+                answers = extracted
+
+        # ensure answers is always a list
+        if not isinstance(answers, list):
+            answers = []
+
+        result["answers"] = answers
+
+        # ensure other fields exist
+        result.setdefault("overall_feedback", "")
+        result.setdefault("aggregate", {})
+
+    except Exception:
         result = {
             "answers": [
                 {
@@ -372,6 +406,34 @@ def analyze_speech_delivery(answer: str, duration_seconds: float) -> dict:
         "sentence_count": sentence_count,
         "avg_words_per_sentence": round(avg_wps, 1),
     }
+
+def convert_audio(input_file: str, output_file: str):
+    subprocess.run([
+        "ffmpeg",
+        "-i", input_file,
+        "-ar", "16000",
+        "-ac", "1",
+        output_file
+    ])
+
+def transcribe_audio(file_path: str) -> str:
+    """
+    Convert speech audio to text using Whisper.
+    """
+
+    try:
+        converted_path = "converted_audio.wav"
+
+        # Convert browser audio (.webm etc) → wav 16khz mono
+        convert_audio(file_path, converted_path)
+
+        result = whisper_model.transcribe(converted_path)
+
+        return result["text"].strip()
+
+    except Exception as e:
+        print("[whisper] transcription error:", e)
+        return ""
 
 
 # ---------------------------------------------------------------------------

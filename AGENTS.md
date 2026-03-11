@@ -26,7 +26,7 @@ The app requires Ollama running locally. Gemini is an optional cloud fallback.
 ```
 # Required — Ollama must be running
 OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=mistral         # default; also phi3 (3.8B, fastest) or llama3 (8B, most accurate)
+OLLAMA_MODEL=mistral     # default; also phi3 (3.8B, fastest) or llama3 (8B, most accurate)
 
 # Optional — enables Gemini fallback
 GEMINI_API_KEY=<key>
