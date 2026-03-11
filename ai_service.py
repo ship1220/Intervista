@@ -7,33 +7,24 @@ import time
 import math
 import asyncio
 import statistics
-import httpx
-import google.genai as genai
+from groq import Groq
 from dotenv import load_dotenv
 from typing import Optional, Dict, Any
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"
+
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 # Configuration
-OLLAMA_TIMEOUT_SECONDS = 120    # per-chunk timeout (with streaming, only triggers if model hangs)
-GEMINI_TIMEOUT_SECONDS = 30
+
 MAX_RETRIES = 1                 # single attempt — streaming eliminates timeout-based retries
 RETRY_DELAY_SECONDS = 0.5
 CACHE_TTL_SECONDS = 300
 MAX_CACHE_SIZE = 200
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-
-# Startup diagnostics
-if not GEMINI_API_KEY:
-    print("[ai_service] WARNING: GEMINI_API_KEY not set — Gemini fallback disabled. "
-          "Ollama will be the only backend. Set GEMINI_API_KEY in .env for a cloud fallback.")
-print(f"[ai_service] Config: model={OLLAMA_MODEL}, timeout={OLLAMA_TIMEOUT_SECONDS}s, "
-      f"retries={MAX_RETRIES}, gemini={'enabled' if GEMINI_API_KEY else 'disabled'}")
-
 # ---------------------------------------------------------------------------
 # TTL Cache
 # ---------------------------------------------------------------------------
@@ -48,69 +39,38 @@ def _cache_get(key: str) -> Optional[str]:
     return None
 
 
-def _cache_set(key: str, value: str) -> None:
+def _cache_set(key: str, value: str):
     if len(_cache) > MAX_CACHE_SIZE:
         oldest = min(_cache, key=lambda k: _cache[k]["ts"])
         _cache.pop(oldest, None)
     _cache[key] = {"value": value, "ts": time.time()}
 
-
-# ---------------------------------------------------------------------------
-# Timeout configuration
-# ---------------------------------------------------------------------------
-_OLLAMA_TIMEOUT = httpx.Timeout(
-    connect=5.0,
-    read=OLLAMA_TIMEOUT_SECONDS,
-    write=10.0,
-    pool=5.0,
-)
-
-_GEMINI_TIMEOUT = httpx.Timeout(
-    connect=5.0,
-    read=GEMINI_TIMEOUT_SECONDS,
-    write=10.0,
-    pool=5.0,
-)
-
-# ---------------------------------------------------------------------------
-# Reusable httpx client
-# ---------------------------------------------------------------------------
-_ollama_client: Optional[httpx.AsyncClient] = None
-
-
-def _get_ollama_client() -> httpx.AsyncClient:
-    global _ollama_client
-    if _ollama_client is None or _ollama_client.is_closed:
-        _ollama_client = httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT)
-    return _ollama_client
-
+def compress_prompt(prompt: str, max_chars: int = 2500):
+    if len(prompt) > max_chars:
+        return prompt[:max_chars]
+    return prompt
 
 # ---------------------------------------------------------------------------
 # JSON Extraction Helper
 # ---------------------------------------------------------------------------
+
 def extract_json(text: str) -> Any:
-    """Parse JSON from text, handling markdown fences and common AI mistakes."""
-    if not text or not text.strip():
-        raise ValueError("Empty text — no JSON to extract")
+
+    if not text:
+        raise ValueError("Empty response")
 
     cleaned = text.strip()
 
-    # Strip markdown code fences
-    fence_match = re.search(r"```(?:json|JSON)?\s*\n?(.*?)\n?\s*```", cleaned, re.DOTALL)
+    fence_match = re.search(r"```(?:json)?\s*(.*?)```", cleaned, re.DOTALL)
+
     if fence_match:
-        cleaned = fence_match.group(1).strip()
-    else:
-        # Find outermost JSON object or array
-        first_brace = None
-        for i, ch in enumerate(cleaned):
-            if ch in ('{', '['):
-                first_brace = i
-                break
-        if first_brace is not None:
-            closer = '}' if cleaned[first_brace] == '{' else ']'
-            last_brace = cleaned.rfind(closer)
-            if last_brace > first_brace:
-                cleaned = cleaned[first_brace:last_brace + 1]
+        cleaned = fence_match.group(1)
+
+    first = cleaned.find("{")
+    last = cleaned.rfind("}")
+
+    if first != -1 and last != -1:
+        cleaned = cleaned[first:last + 1]
 
     # Attempt 1: direct parse
     try:
@@ -158,7 +118,41 @@ def extract_json(text: str) -> Any:
     print(f"[extract_json] Raw text ({len(text)} chars): {text[:500]}")
     raise ValueError(f"Could not extract valid JSON from text ({len(text)} chars)")
 
+# ------------------------------------------------------------------
+# GROQ CALL
+# ------------------------------------------------------------------
+async def _call_groq(prompt: str, json_mode=False) -> str:
 
+    def _run():
+
+        messages = []
+
+        if json_mode:
+            messages.append({
+                "role": "system",
+                "content": "Return valid JSON only. No explanation."
+            })
+
+        messages.append({
+            "role": "user",
+            "content": prompt
+        })
+
+        response = groq_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            temperature=0.4 if json_mode else 0.7,
+        )
+
+        content = response.choices[0].message.content
+
+        if not content:
+            return ""
+
+        return content.strip()
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _run)
 # ---------------------------------------------------------------------------
 # Response Validator
 # ---------------------------------------------------------------------------
@@ -219,157 +213,6 @@ def get_fallback_response(num_questions: int = 5) -> Dict:
         },
     }
 
-
-# ---------------------------------------------------------------------------
-# Ollama Implementation
-# ---------------------------------------------------------------------------
-async def _try_ollama_with_retry(prompt: str, json_mode: bool = False) -> Optional[str]:
-    """Try Ollama /api/chat with limited retry.
-
-    Only uses /api/chat (not /api/generate) to avoid doubling latency.
-    Fails fast so the Gemini fallback can be reached without excessive delay.
-    """
-    for attempt in range(MAX_RETRIES):
-        try:
-            text = await _ollama_chat(prompt, json_mode)
-            if text:
-                return text
-            print(f"[ollama] attempt {attempt + 1}: empty response")
-        except httpx.ReadTimeout:
-            print(f"[ollama] attempt {attempt + 1}: timeout ({OLLAMA_TIMEOUT_SECONDS}s)")
-        except (httpx.ConnectError, httpx.ConnectTimeout, ConnectionRefusedError, OSError):
-            print(f"[ollama] Ollama not reachable at {OLLAMA_URL} — skipping retries")
-            return None
-        except Exception as e:
-            print(f"[ollama] attempt {attempt + 1}: {type(e).__name__}: {e}")
-
-        if attempt < MAX_RETRIES - 1:
-            await asyncio.sleep(RETRY_DELAY_SECONDS)
-
-    return None
-
-
-async def _ollama_chat(prompt: str, json_mode: bool = False) -> Optional[str]:
-    """Call Ollama /api/chat with streaming.
-
-    Streaming is critical: with stream=False, Ollama buffers the entire
-    response before sending anything.  If generation takes longer than the
-    httpx read-timeout the request is killed even though Ollama is working.
-    With stream=True each token resets the read-timeout, so total generation
-    time is effectively unlimited.
-    """
-    try:
-        client = _get_ollama_client()
-        system_msg = (
-            "Respond with valid JSON only. No markdown fences, no extra text."
-        ) if json_mode else "You are a helpful assistant."
-
-        payload = {
-            "model": OLLAMA_MODEL,
-            "messages": [
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": prompt},
-            ],
-            "stream": True,
-            "options": {
-                "num_predict": 2048,
-                "temperature": 0.3 if json_mode else 0.7,
-                "top_p": 0.9,
-            },
-        }
-        if json_mode:
-            payload["format"] = "json"
-
-        start_time = time.time()
-        chunks: list[str] = []
-
-        async with client.stream("POST", f"{OLLAMA_URL}/api/chat", json=payload) as resp:
-            if resp.status_code != 200:
-                body = await resp.aread()
-                print(f"[ollama] /api/chat HTTP {resp.status_code}: {body[:200]}")
-                return None
-
-            async for line in resp.aiter_lines():
-                if not line.strip():
-                    continue
-                try:
-                    data = json.loads(line)
-                    token = data.get("message", {}).get("content", "")
-                    if token:
-                        chunks.append(token)
-                    if data.get("done", False):
-                        break
-                except json.JSONDecodeError:
-                    continue
-
-        text = "".join(chunks).strip()
-        latency = time.time() - start_time
-        print(f"[ollama] /api/chat stream done: {latency:.1f}s, {len(chunks)} chunks, {len(text)} chars  json_mode={json_mode}")
-
-        if text:
-            return text
-        print("[ollama] /api/chat streaming completed but empty content")
-    except httpx.ReadTimeout:
-        print(f"[ollama] /api/chat ReadTimeout ({OLLAMA_TIMEOUT_SECONDS}s between chunks — model may be hung)")
-        raise
-    except (httpx.ConnectError, httpx.ConnectTimeout, ConnectionRefusedError, OSError):
-        raise  # Let _try_ollama_with_retry handle connection failures
-    except Exception as e:
-        print(f"[ollama] /api/chat error: {type(e).__name__}: {e}")
-    return None
-
-
-
-# ---------------------------------------------------------------------------
-# Gemini Fallback — fixed model name + SDK compatibility
-# ---------------------------------------------------------------------------
-async def _try_gemini(prompt: str) -> Optional[str]:
-    """Run Gemini as fallback. Single attempt to minimise total latency."""
-    if not GEMINI_API_KEY:
-        print("[gemini] No GEMINI_API_KEY configured")
-        return None
-
-    try:
-        result = await _gemini_async(prompt)
-        if result:
-            print(f"[gemini] Success ({len(result)} chars)")
-            return result
-        print("[gemini] Empty response")
-    except Exception as e:
-        print(f"[gemini] Error: {type(e).__name__}: {e}")
-
-    return None
-
-
-async def _gemini_async(prompt: str) -> str:
-    """Execute Gemini call asynchronously.
-
-    Tries the new Client API first (google-generativeai >= 0.8 / google-genai),
-    then falls back to the legacy GenerativeModel API.
-    """
-    def _call_gemini():
-        start_time = time.time()
-        try:
-            # New SDK style (google-generativeai >= 0.8 or google-genai package)
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-            )
-        except (AttributeError, TypeError):
-            # Old SDK style (google-generativeai < 0.8)
-            genai.configure(api_key=GEMINI_API_KEY)
-            model = genai.GenerativeModel(GEMINI_MODEL)
-            response = model.generate_content(prompt)
-
-        latency = time.time() - start_time
-        print(f"[gemini] latency: {latency:.2f}s  model={GEMINI_MODEL}")
-        return response.text.strip()
-
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _call_gemini)
-
-
 # ---------------------------------------------------------------------------
 # Main Content Generation
 # ---------------------------------------------------------------------------
@@ -379,135 +222,58 @@ async def generate_content(
     use_cache: bool = True,
     json_mode: bool = False
 ) -> str:
-    """Send prompt to AI and return text response with fallback."""
-    
-    # Check cache
+
     if use_cache:
         cached = _cache_get(prompt)
-        if cached is not None:
-            print("[ai_service] Returning cached response")
+        if cached:
             return cached
-    
-    # Try Ollama first
-    print(f"[ai_service] Trying Ollama (model: {OLLAMA_MODEL})...")
-    result = await _try_ollama_with_retry(prompt, json_mode=json_mode)
-    
-    # Fallback to Gemini
-    if not result:
-        if GEMINI_API_KEY:
-            print("[ai_service] Ollama failed, trying Gemini fallback...")
-            result = await _try_gemini(prompt)
-        else:
-            print("[ai_service] Ollama failed. Gemini unavailable (no GEMINI_API_KEY).")
-    
-    # If all failed, return empty
-    if not result:
-        print(f"[ai_service] WARNING: All AI backends failed for prompt ({len(prompt)} chars): {prompt[:120]}...")
-        return ""
-    
-    # Log preview
-    preview = result[:300].replace("\n", " ")
-    print(f"[ai_service] Response preview ({len(result)} chars): {preview}")
-    
-    # Cache the result
-    if use_cache:
+
+    prompt = compress_prompt(prompt)
+
+    try:
+        result = await _call_groq(prompt, json_mode=json_mode)
+
+    except Exception as e:
+        print("[groq] error:", e)
+        result = ""
+
+    if use_cache and result:
         _cache_set(prompt, result)
-    
+
     return result
-
-
 # ---------------------------------------------------------------------------
 # Evaluate Content - Main function for interview evaluation
 # ---------------------------------------------------------------------------
-async def evaluate_content(
-    role: str,
-    level: str,
-    questions_answers: list
-) -> Dict:
-    """Evaluate interview content and return structured analysis."""
+async def evaluate_content(role: str, level: str, questions_answers: list) -> Dict:
+
     from prompts import interview_evaluation_prompt
 
-    num_questions = len(questions_answers)
     prompt = interview_evaluation_prompt(role, questions_answers)
 
     raw = await generate_content(prompt, use_cache=False, json_mode=True)
-    print(f"[evaluate_content] Raw response length: {len(raw) if raw else 0}")
 
-    if raw and raw.strip():
-        try:
-            result = extract_json(raw)
-            if isinstance(result, dict):
-                normalized = _normalize_response(result, num_questions)
-                print(f"[evaluate_content] Success: {len(normalized.get('answers', []))} answers")
-                return normalized
-            print(f"[evaluate_content] Unexpected type: {type(result).__name__}")
-        except Exception as e:
-            print(f"[evaluate_content] Parse error: {e}")
-            print(f"[evaluate_content] Raw text preview: {raw[:500]}")
+    try:
 
-    print("[evaluate_content] Using fallback")
-    return get_fallback_response(num_questions)
+        result = extract_json(raw)
 
+    except Exception:
 
-def _normalize_response(result: Dict, num_questions: int) -> Dict:
-    """Normalize AI response to the format expected by main.py / report.html."""
+        result = {
+            "answers": [
+                {
+                    "score": 50,
+                    "feedback": "Evaluation unavailable.",
+                    "strengths": [],
+                    "weaknesses": [],
+                    "ideal_answer": ""
+                }
+                for _ in questions_answers
+            ],
+            "overall_feedback": "",
+            "aggregate": {}
+        }
 
-    # Find answers from various possible keys
-    answers = None
-    for key in ["answers", "feedback_per_question", "evaluations", "results"]:
-        if key in result and isinstance(result[key], list):
-            answers = result[key]
-            break
-
-    if answers is None:
-        answers = []
-
-    # Normalize each answer entry
-    normalized_answers = []
-    
-    for i in range(num_questions):
-        if i < len(answers) and isinstance(answers[i], dict):
-            ans = answers[i]
-    
-            normalized_answers.append({
-                "score": ans.get("score", 50),
-                "feedback": ans.get("feedback", ans.get("comment", "Feedback unavailable.")),
-                "strengths": ans.get("strengths", []),
-                "weaknesses": ans.get("weaknesses", []),
-                "ideal_answer": ans.get("ideal_answer", ""),
-            })
-
-        else:
-            normalized_answers.append({
-                "score": 50,
-                "feedback": "Feedback unavailable for this question.",
-                "strengths": [],
-                "weaknesses": [],
-                "ideal_answer": "",
-            })
-
-    # Preserve the original aggregate dict and add defaults for any
-    # keys that report.html needs but the AI may not have returned.
-    aggregate = result.get("aggregate", result.get("scores", {}))
-    if not isinstance(aggregate, dict):
-        aggregate = {}
-
-    avg_score = sum(a["score"] for a in normalized_answers) / max(len(normalized_answers), 1)
-    aggregate.setdefault("relevance_score", round(avg_score))
-    aggregate.setdefault("depth_score", round(avg_score * 0.9))
-    aggregate.setdefault("star_method_score", round(avg_score * 0.7))
-
-    overall_feedback = result.get("overall_feedback", result.get("summary", ""))
-    if not overall_feedback:
-        overall_feedback = "Evaluation completed. Review individual feedback above."
-
-    return {
-        "answers": normalized_answers,
-        "overall_feedback": overall_feedback,
-        "aggregate": aggregate,
-    }
-
-
+    return result
 # ---------------------------------------------------------------------------
 # Speech Analysis
 # ---------------------------------------------------------------------------

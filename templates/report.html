@@ -40,16 +40,17 @@
       <h2>Overall Performance</h2>
 
       <!-- SVG circular gauge -->
+      {% set gauge_color = '#10b981' if report.overall_score >= 70 else '#f59e0b' if report.overall_score >= 50 else '#ef4444' %}
       <div class="score-gauge" style="margin:24px auto;">
         <svg width="160" height="160" viewBox="0 0 160 160">
           <circle class="gauge-bg" cx="80" cy="80" r="68"></circle>
           <circle class="gauge-fill" cx="80" cy="80" r="68"
                   stroke-dasharray="427.3"
                   stroke-dashoffset="{{ 427.3 - (427.3 * report.overall_score / 100) }}"
-                  style="stroke:{% if report.overall_score >= 70 %}#10b981{% elif report.overall_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></circle>
+                  style="stroke:{{ gauge_color }};"></circle>
         </svg>
         <div class="gauge-label">
-          <span class="gauge-value" style="color:{% if report.overall_score >= 70 %}#10b981{% elif report.overall_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};">{{ report.overall_score }}</span>
+          <span class="gauge-value" style="color:{{ gauge_color }};">{{ report.overall_score }}</span>
           <span class="gauge-sub">out of 100</span>
         </div>
       </div>
@@ -128,9 +129,10 @@
         <!-- Average score -->
         <div style="margin-bottom:14px;">
           <strong style="font-size:.9rem;">Average Answer Score</strong>
+          {% set avg_color = '#10b981' if ca.average_score >= 70 else '#f59e0b' if ca.average_score >= 50 else '#ef4444' %}
           <div class="score-bar-wrap">
             <div class="score-bar">
-              <div class="score-bar-fill" style="width:{{ ca.average_score | default(0) }}%;background:{% if ca.average_score  >= 70 %}#10b981{% elif ca.average_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></div>
+              <div class="score-bar-fill" style="width:{{ ca.average_score | default(0) }}%;background:{{ avg_color }};"></div>
             </div>
             <span class="score-bar-value">{{ ca.average_score }}</span>
           </div>
@@ -138,9 +140,10 @@
         <!-- Relevance -->
         <div style="margin-bottom:14px;">
           <strong style="font-size:.9rem;">Relevance</strong>
+          {% set rel_color = '#10b981' if ca.relevance_score >= 70 else '#f59e0b' if ca.relevance_score >= 50 else '#ef4444' %}
           <div class="score-bar-wrap">
             <div class="score-bar">
-              <div class="score-bar-fill" style="width:{{ ca.relevance_score }}%;background:{% if ca.relevance_score >= 70 %}#10b981{% elif ca.relevance_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></div>
+              <div class="score-bar-fill" style="width:{{ ca.relevance_score }}%;background:{{ rel_color }};"></div>
             </div>
             <span class="score-bar-value">{{ ca.relevance_score }}</span>
           </div>
@@ -148,9 +151,10 @@
         <!-- Depth -->
         <div style="margin-bottom:14px;">
           <strong style="font-size:.9rem;">Depth of Explanation</strong>
+          {% set depth_color = '#10b981' if ca.depth_score >= 70 else '#f59e0b' if ca.depth_score >= 50 else '#ef4444' %}
           <div class="score-bar-wrap">
             <div class="score-bar">
-              <div class="score-bar-fill" style="width:{{ ca.depth_score }}%;background:{% if ca.depth_score >= 70 %}#10b981{% elif ca.depth_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></div>
+              <div class="score-bar-fill" style="width:{{ ca.depth_score }}%;background:{{ depth_color }};"></div>
             </div>
             <span class="score-bar-value">{{ ca.depth_score }}</span>
           </div>
@@ -158,9 +162,10 @@
         <!-- STAR method -->
         <div style="margin-bottom:4px;">
           <strong style="font-size:.9rem;">STAR Method Usage</strong>
+          {% set star_color = '#10b981' if ca.star_method_score >= 70 else '#f59e0b' if ca.star_method_score >= 50 else '#ef4444' %}
           <div class="score-bar-wrap">
             <div class="score-bar">
-              <div class="score-bar-fill" style="width:{{ ca.star_method_score }}%;background:{% if ca.star_method_score >= 70 %}#10b981{% elif ca.star_method_score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></div>
+              <div class="score-bar-fill" style="width:{{ ca.star_method_score }}%;background:{{ star_color }};"></div>
             </div>
             <span class="score-bar-value">{{ ca.star_method_score }}</span>
           </div>
@@ -208,11 +213,12 @@
 
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;">
           <strong style="font-size:.9rem;">Score:</strong>
-          <span style="font-size:1.2rem;font-weight:700;color:{% if ans.score >= 70 %}#10b981{% elif ans.score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};">
+          {% set score_color = '#10b981' if ans.score >= 70 else '#f59e0b' if ans.score >= 50 else '#ef4444' %}
+          <span style="font-size:1.2rem;font-weight:700;color:{{ score_color }};">
             {{ ans.score }}/100
           </span>
           <div class="score-bar" style="max-width:200px;">
-            <div class="score-bar-fill" style="width:{{ ans.score }}%;background:{% if ans.score >= 70 %}#10b981{% elif ans.score >= 50 %}#f59e0b{% else %}#ef4444{% endif %};"></div>
+            <div class="score-bar-fill" style="width:{{ ans.score }}%;background:{{ score_color }};"></div>
           </div>
         </div>
 

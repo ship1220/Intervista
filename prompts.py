@@ -2,15 +2,16 @@
 
 
 def interview_questions_prompt(role: str, level: str, count: int = 5) -> str:
-    return f"""Generate {count} interview questions for a {level} {role}. Mix behavioral, technical, and situational.
-Return ONLY a JSON array of strings:
+    return f"""Generate EXACTLY {count} interview questions for a {level} {role}.
+Mix technical and behavioral questions.
+Return a JSON array with exactly {count} strings.
 ["Question 1?", "Question 2?"]"""
 
 
 def interview_questions_with_resume_prompt(role: str, level: str, resume_text: str, count: int = 5) -> str:
-    truncated = resume_text[:800]
+    truncated = resume_text[:400]
     return f"""Generate {count} personalized interview questions for a {level} {role} based on their resume.
-Mix: resume-specific, technical, behavioral, and gap-probing questions.
+Mix: resume-specific, technical, behavioral.
 
 Resume:
 {truncated}
