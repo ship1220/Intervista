@@ -21,7 +21,7 @@ MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 # Whisper model (loaded once)
-whisper_model = whisper.load_model("base")
+whisper_model = whisper.load_model("small")
 # Configuration
 
 MAX_RETRIES = 1                 # single attempt — streaming eliminates timeout-based retries
@@ -261,17 +261,18 @@ async def evaluate_content(role: str, level: str, questions_answers: list) -> Di
 
     raw = await generate_content(prompt, use_cache=False, json_mode=True)
 
+    print("RAW EVALUATION:", raw[:1200])
+
     try:
         result = extract_json(raw)
 
-        # ---- NORMALIZE ANSWERS STRUCTURE ----
         answers = result.get("answers")
 
-        # Case 1: answers is a dict like {"Q1": {...}, "Q2": {...}}
+        # If answers is a dict → convert to list
         if isinstance(answers, dict):
             answers = list(answers.values())
 
-        # Case 2: answers missing but Q1/Q2 keys exist
+        # If answers missing → search for Q1/Q2 keys
         if not answers:
             extracted = []
             for key, value in result.items():
@@ -281,19 +282,69 @@ async def evaluate_content(role: str, level: str, questions_answers: list) -> Di
             if extracted:
                 answers = extracted
 
-        # ensure answers is always a list
-        if not isinstance(answers, list):
-            answers = []
+        # If still invalid → fallback
+        if not isinstance(answers, list) or len(answers) == 0:
+            answers = [
+                {
+                    "score": 50,
+                    "feedback": "Evaluation could not be generated.",
+                    "strengths": [],
+                    "weaknesses": [],
+                    "ideal_answer": ""
+                }
+                for _ in questions_answers
+            ]
 
         result["answers"] = answers
 
-        # ensure other fields exist
         result.setdefault("overall_feedback", "")
         result.setdefault("aggregate", {})
 
+        # Ensure each answer has required fields
+        for ans in result["answers"]:
+            ans.setdefault("score", 50)
+            ans.setdefault("feedback", "No detailed feedback generated.")
+            ans.setdefault("strengths", ["Answer attempted."])
+            ans.setdefault("weaknesses", ["More explanation needed."])
+            ans.setdefault(
+                "ideal_answer",
+                "A more structured answer with examples would improve this response."
+            )
+
     except Exception:
-        result = {
-            "answers": [
+
+        # Fallback: parse plain-text evaluation
+        answers = []
+        blocks = raw.split("**Q")
+
+        for block in blocks[1:]:
+            try:
+                score_match = re.search(r"Score:\s*(\d+)", block)
+                feedback_match = re.search(r"Feedback:\s*(.*?)(?:Strengths:)", block, re.S)
+
+                score = int(score_match.group(1)) if score_match else 50
+                feedback = feedback_match.group(1).strip() if feedback_match else "No feedback available."
+
+                answers.append({
+                    "score": score,
+                    "feedback": feedback,
+                    "strengths": ["Answer attempted."],
+                    "weaknesses": ["Needs clearer structure and examples."],
+                    "ideal_answer": ""
+                })
+
+            except Exception:
+                answers.append({
+                    "score": 50,
+                    "feedback": "Evaluation unavailable.",
+                    "strengths": [],
+                    "weaknesses": [],
+                    "ideal_answer": ""
+                })
+
+        # Ensure answer count matches questions
+        if len(answers) < len(questions_answers):
+            answers.extend([
                 {
                     "score": 50,
                     "feedback": "Evaluation unavailable.",
@@ -301,8 +352,11 @@ async def evaluate_content(role: str, level: str, questions_answers: list) -> Di
                     "weaknesses": [],
                     "ideal_answer": ""
                 }
-                for _ in questions_answers
-            ],
+                for _ in range(len(questions_answers) - len(answers))
+            ])
+
+        result = {
+            "answers": answers,
             "overall_feedback": "",
             "aggregate": {}
         }
@@ -413,6 +467,7 @@ def convert_audio(input_file: str, output_file: str):
         "-i", input_file,
         "-ar", "16000",
         "-ac", "1",
+        "-f", "wav",
         output_file
     ])
 
@@ -427,7 +482,11 @@ def transcribe_audio(file_path: str) -> str:
         # Convert browser audio (.webm etc) → wav 16khz mono
         convert_audio(file_path, converted_path)
 
-        result = whisper_model.transcribe(converted_path)
+        result = whisper_model.transcribe(
+                 converted_path,
+                 language="en",
+                 fp16=False
+             )
 
         return result["text"].strip()
 

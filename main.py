@@ -251,7 +251,7 @@ def start_interview_page(request: Request, role: str = Form(...), level: str = F
 # INTERVIEW API — Generate questions (called by JS after page loads)
 # ===========================================================================
 @app.get("/api/interview/questions")
-async def api_interview_questions(request: Request, role: str, level: str, count: int = 5, db: Session = Depends(get_db)):
+async def api_interview_questions(request: Request, role: str, level: str, count: int = 2, db: Session = Depends(get_db)):
     user = get_current_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
