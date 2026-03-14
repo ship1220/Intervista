@@ -3,6 +3,7 @@
 import io
 import json
 import re
+import models
 from datetime import datetime, timezone
 from fastapi import FastAPI, Request, Form, Depends, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from ai_service import transcribe_audio
 from sse_starlette.sse import EventSourceResponse
+from database import Base, engine
 
 from database import SessionLocal
 from models import User, InterviewAttempt, SkillProgress
@@ -463,6 +465,7 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
                 "average_speaking_pace_wpm": round(avg_pace, 1),
                 "total_filler_words": total_fillers,
                 "confidence_score": confidence,
+                "weak_topics": content_result.get("weak_topics", [])
             },
         }
 

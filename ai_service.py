@@ -48,7 +48,7 @@ def _cache_set(key: str, value: str):
         _cache.pop(oldest, None)
     _cache[key] = {"value": value, "ts": time.time()}
 
-def compress_prompt(prompt: str, max_chars: int = 2500):
+def compress_prompt(prompt: str, max_chars: int = 1600):
     if len(prompt) > max_chars:
         return prompt[:max_chars]
     return prompt
@@ -284,16 +284,7 @@ async def evaluate_content(role: str, level: str, questions_answers: list) -> Di
 
         # If still invalid → fallback
         if not isinstance(answers, list) or len(answers) == 0:
-            answers = [
-                {
-                    "score": 50,
-                    "feedback": "Evaluation could not be generated.",
-                    "strengths": [],
-                    "weaknesses": [],
-                    "ideal_answer": ""
-                }
-                for _ in questions_answers
-            ]
+            raise ValueError("Invalid JSON evaluation format")
 
         result["answers"] = answers
 
@@ -315,24 +306,65 @@ async def evaluate_content(role: str, level: str, questions_answers: list) -> Di
 
         # Fallback: parse plain-text evaluation
         answers = []
-        blocks = raw.split("**Q")
+        blocks = re.split(r"\*\*Q\d+", raw)
 
         for block in blocks[1:]:
             try:
-                score_match = re.search(r"Score:\s*(\d+)", block)
-                feedback_match = re.search(r"Feedback:\s*(.*?)(?:Strengths:)", block, re.S)
-
+                score_match = re.search(r"\d+\.\s*Score:\s*(\d+)", block)
+        
+                feedback_match = re.search(
+                    r"Feedback:\s*(.*?)(?:\d+\.\s*Strengths:)",
+                    block,
+                    re.S
+                )
+        
+                strengths_match = re.search(
+                    r"Strengths:\s*(.*?)(?:\d+\.\s*Weaknesses:)",
+                    block,
+                    re.S
+                )
+        
+                weaknesses_match = re.search(
+                    r"Weaknesses:\s*(.*?)(?:\d+\.\s*Ideal)",
+                    block,
+                    re.S
+                )
+        
+                ideal_match = re.search(
+                    r"Ideal[_ ]?Answer:\s*(.*)",
+                    block,
+                    re.S
+                )
+        
                 score = int(score_match.group(1)) if score_match else 50
                 feedback = feedback_match.group(1).strip() if feedback_match else "No feedback available."
-
+        
+                strengths = []
+                if strengths_match:
+                    strengths = [
+                        s.strip("* ").strip()
+                        for s in strengths_match.group(1).split("\n")
+                        if s.strip()
+                    ]
+        
+                weaknesses = []
+                if weaknesses_match:
+                    weaknesses = [
+                        w.strip("* ").strip()
+                        for w in weaknesses_match.group(1).split("\n")
+                        if w.strip()
+                    ]
+        
+                ideal_answer = ideal_match.group(1).strip() if ideal_match else ""
+        
                 answers.append({
                     "score": score,
                     "feedback": feedback,
-                    "strengths": ["Answer attempted."],
-                    "weaknesses": ["Needs clearer structure and examples."],
-                    "ideal_answer": ""
+                    "strengths": strengths if strengths else ["Answer attempted."],
+                    "weaknesses": weaknesses if weaknesses else ["Needs clearer structure and examples."],
+                    "ideal_answer": ideal_answer
                 })
-
+        
             except Exception:
                 answers.append({
                     "score": 50,
@@ -341,7 +373,7 @@ async def evaluate_content(role: str, level: str, questions_answers: list) -> Di
                     "weaknesses": [],
                     "ideal_answer": ""
                 })
-
+        
         # Ensure answer count matches questions
         if len(answers) < len(questions_answers):
             answers.extend([
@@ -483,10 +515,12 @@ def transcribe_audio(file_path: str) -> str:
         convert_audio(file_path, converted_path)
 
         result = whisper_model.transcribe(
-                 converted_path,
-                 language="en",
-                 fp16=False
-             )
+    converted_path,
+    language="en",
+    temperature=0,
+    best_of=5,
+    beam_size=5
+)
 
         return result["text"].strip()
 

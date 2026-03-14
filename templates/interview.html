@@ -1,430 +1,463 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <link rel="stylesheet" href="/static/styles.css" />
-  <title>AI Voice Interview</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="/static/styles.css">
+<title>AI Voice Interview</title>
 </head>
+
 <body>
 
-  <header class="page-header">
-    <h1>AI Voice Interview</h1>
-    <div class="top-right">
-      Logged in as <b>{{ username }}</b>
-      <a href="/index" class="btn small-btn">Back to Dashboard</a>
-      <a href="/logout/" class="logout-link">Logout</a>
-    </div>
-  </header>
+<header class="page-header">
+<h1>AI Voice Interview</h1>
 
-  <main>
+<div class="top-right">
+Logged in as <b>{{ username }}</b>
+<a href="/index" class="btn small-btn">Back to Dashboard</a>
+<a href="/logout/" class="logout-link">Logout</a>
+</div>
 
-    <!-- PHASE 1: Loading questions -->
-    <section id="loading-phase" class="card">
-      <h2>{{ role }} &mdash; {{ level }}</h2>
-      <div class="status-indicator">
-        <div class="pulse-dot"></div>
-        <span id="loading-status">Preparing your interview questions...</span>
-      </div>
-    </section>
+</header>
 
-    <!-- PHASE 2: Voice interview -->
-    <section id="interview-phase" class="card" style="display:none;">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-        <h2>{{ role }} &mdash; {{ level }}</h2>
-        <span class="badge" id="question-counter">Question 1 / 5</span>
-      </div>
 
-      <div id="interviewer-bubble" class="interviewer-bubble">
-        <div class="bubble-label">AI Interviewer</div>
-        <p id="current-question"></p>
-      </div>
+<main>
 
-      <div id="voice-status" class="voice-status">
-        <div class="voice-ring" id="voice-ring"></div>
-        <span id="voice-status-text">Waiting...</span>
-      </div>
+<!-- ================= LOADING ================= -->
 
-      <div id="transcript-area" style="margin-top:16px;">
-        <label style="font-size:0.9rem;">Your answer (live transcript):</label>
-        <textarea id="live-transcript" readonly placeholder="Your speech will appear here..."
-                  style="min-height:80px;opacity:0.85;"></textarea>
-      </div>
+<section id="loading-phase" class="card">
 
-      <div style="margin-top:16px;display:flex;gap:12px;flex-wrap:wrap;">
-        <button id="btn-skip" class="btn outline" style="width:140px;">Skip Question</button>
-        <button id="btn-end-early" class="btn outline" style="width:180px;">End Interview Early</button>
-      </div>
-    </section>
+<h2>{{ role }} — {{ level }}</h2>
 
-    <!-- PHASE 3: Evaluating -->
-    <section id="evaluating-phase" class="card" style="display:none;">
-      <h2>Interview Complete</h2>
-      <div class="status-indicator">
-        <div class="pulse-dot"></div>
-        <span id="eval-status">Analyzing your responses...</span>
-      </div>
-    </section>
+<div class="status-indicator">
+<div class="pulse-dot"></div>
+<span id="loading-status">Preparing your interview questions...</span>
+</div>
 
-    <!-- PHASE 4: Results -->
-    <section id="results-phase" class="card" style="display:none;">
-      <h2>Interview Feedback</h2>
-      <div id="results-container"></div>
+</section>
 
-      <div id="general-tips" style="margin-top:24px;"></div>
-      <div id="resources" style="margin-top:16px;"></div>
 
-      <div style="margin-top:24px;display:flex;gap:12px;">
-        <a href="/index" class="btn">Back to Dashboard</a>
-        <a href="/progress" class="btn outline">View Progress</a>
-      </div>
-    </section>
 
-  </main>
+<!-- ================= INTERVIEW ================= -->
+
+<section id="interview-phase" class="card" style="display:none;">
+
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+
+<h2>{{ role }} — {{ level }}</h2>
+
+<span class="badge" id="question-counter">Question 1 / 5</span>
+
+</div>
+
+
+<div id="interviewer-bubble" class="interviewer-bubble">
+
+<div class="bubble-label">AI Interviewer</div>
+
+<p id="current-question"></p>
+
+</div>
+
+
+<!-- CODING TIMER -->
+
+<div id="coding-timer" style="display:none;margin-top:10px;">
+<span>Thinking time: </span>
+<b id="timer-value">120</b> seconds
+</div>
+
+
+<div id="voice-status" class="voice-status">
+
+<div class="voice-ring" id="voice-ring"></div>
+
+<span id="voice-status-text">Waiting...</span>
+
+</div>
+
+
+<div id="transcript-area" style="margin-top:16px;">
+
+<label style="font-size:0.9rem;">Your answer (live transcript):</label>
+
+<textarea
+id="live-transcript"
+readonly
+placeholder="Your speech will appear here..."
+style="min-height:80px;opacity:0.85;"></textarea>
+
+</div>
+
+
+<div style="margin-top:16px;display:flex;gap:12px;flex-wrap:wrap;">
+
+<button id="btn-skip" class="btn outline" style="width:140px;">Skip Question</button>
+
+<button id="btn-end-early" class="btn outline" style="width:180px;">End Interview Early</button>
+
+</div>
+
+</section>
+
+
+
+<!-- ================= EVALUATING ================= -->
+
+<section id="evaluating-phase" class="card" style="display:none;">
+
+<h2>Interview Complete</h2>
+
+<div class="status-indicator">
+<div class="pulse-dot"></div>
+<span id="eval-status">Analyzing your responses...</span>
+</div>
+
+</section>
+
+</main>
+
+
 
 <script>
-(function() {
-  // =========================================================================
-  // Config from template
-  // =========================================================================
-  const ROLE  = "{{ role }}";
-  const LEVEL = "{{ level }}";
-  const TOTAL_QUESTIONS = 5;
 
-  // =========================================================================
-  // Phase elements
-  // =========================================================================
-  const loadingPhase    = document.getElementById('loading-phase');
-  const interviewPhase  = document.getElementById('interview-phase');
-  const evaluatingPhase = document.getElementById('evaluating-phase');
-  const resultsPhase    = document.getElementById('results-phase');
+(function(){
 
-  // =========================================================================
-  // Interview state
-  // =========================================================================
-  let questions = [];
-  let answers   = [];   // [{question, answer, start_time, end_time, duration}]
-  let currentIdx = 0;
-  let recognition = null;
-  let isListening = false;
-  let answerStartTime = null;
+const ROLE="{{ role }}";
+const LEVEL="{{ level }}";
+const TOTAL_QUESTIONS=5;
 
-  // =========================================================================
-  // TTS — SpeechSynthesis
-  // =========================================================================
-  function speak(text) {
-    return new Promise((resolve) => {
-      if (!('speechSynthesis' in window)) { resolve(); return; }
-      window.speechSynthesis.cancel();
-      const utter = new SpeechSynthesisUtterance(text);
-      utter.rate = 1.0;
-      utter.pitch = 1.0;
-      utter.onend = resolve;
-      utter.onerror = resolve;
-      window.speechSynthesis.speak(utter);
-    });
-  }
 
-  // =========================================================================
-  // STT — Web Speech API
-  // =========================================================================
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-  function startListening() {
-    return new Promise((resolve, reject) => {
-      if (!SpeechRecognition) {
-        reject(new Error('Speech recognition not supported'));
-        return;
-      }
+let questions=[];
+let answers=[];
+let currentIdx=0;
 
-      recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
+let recognition=null;
+let isListening=false;
+let answerStartTime=null;
 
-      let finalTranscript = '';
-      let silenceTimer = null;
-      const SILENCE_TIMEOUT = 4000;  // 4 seconds of silence = done
 
-      const transcript = document.getElementById('live-transcript');
-      const statusText = document.getElementById('voice-status-text');
-      const ring = document.getElementById('voice-ring');
 
-      recognition.onstart = () => {
-        isListening = true;
-        statusText.textContent = 'Listening... speak now';
-        ring.classList.add('active');
-      };
+/* ================= SPEECH SYNTHESIS ================= */
 
-      recognition.onresult = (event) => {
-        clearTimeout(silenceTimer);
-        let interim = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          if (event.results[i].isFinal) {
-            finalTranscript += event.results[i][0].transcript + ' ';
-          } else {
-            interim += event.results[i][0].transcript;
-          }
-        }
-        transcript.value = finalTranscript + interim;
+function speak(text){
 
-        // Reset silence timer
-        silenceTimer = setTimeout(() => {
-          recognition.stop();
-        }, SILENCE_TIMEOUT);
-      };
+return new Promise(resolve=>{
 
-      recognition.onerror = (event) => {
-        if (event.error !== 'aborted') {
-          console.warn('Speech recognition error:', event.error);
-        }
-      };
+if(!('speechSynthesis' in window)){resolve();return;}
 
-      recognition.onend = () => {
-        isListening = false;
-        ring.classList.remove('active');
-        statusText.textContent = 'Processing...';
-        clearTimeout(silenceTimer);
-        resolve(finalTranscript.trim());
-      };
+window.speechSynthesis.cancel();
 
-      recognition.start();
-    });
-  }
+const utter=new SpeechSynthesisUtterance(text);
 
-  function stopListening() {
-    if (recognition && isListening) {
-      recognition.stop();
-    }
-  }
+utter.rate=1;
+utter.pitch=1;
 
-  // =========================================================================
-  // Phase transitions
-  // =========================================================================
-  function showPhase(phase) {
-    [loadingPhase, interviewPhase, evaluatingPhase, resultsPhase]
-      .forEach(el => el.style.display = 'none');
-    phase.style.display = 'block';
-    phase.scrollIntoView({ behavior: 'smooth' });
-  }
+utter.onend=resolve;
+utter.onerror=resolve;
 
-  // =========================================================================
-  // 1. Fetch questions
-  // =========================================================================
-  async function fetchQuestions() {
-    console.log('[interview] Fetching questions from API...');
-    const resp = await fetch(
-      `/api/interview/questions?role=${encodeURIComponent(ROLE)}&level=${encodeURIComponent(LEVEL)}&count=${TOTAL_QUESTIONS}`
-    );
-    const data = await resp.json();
-    console.log('[interview] API response:', data);
-    console.log('[interview] Fetched questions:', data.questions);
-    console.log('[interview] Number of questions:', data.questions ? data.questions.length : 0);
-    return data.questions || [];
-  }
+window.speechSynthesis.speak(utter);
 
-  // =========================================================================
-  // 2. Run interview loop
-  // =========================================================================
-  async function runInterview() {
-    showPhase(interviewPhase);
+});
 
-    for (currentIdx = 0; currentIdx < questions.length; currentIdx++) {
-      const q = questions[currentIdx];
-      document.getElementById('question-counter').textContent =
-        `Question ${currentIdx + 1} / ${questions.length}`;
-      document.getElementById('current-question').textContent = q;
-      document.getElementById('live-transcript').value = '';
-      document.getElementById('voice-status-text').textContent = 'AI is speaking...';
+}
 
-      // AI speaks the question
-      await speak(q);
 
-      // Listen for answer — capture timestamps
-      answerStartTime = new Date().toISOString();
-      let answerText = '';
-      try {
-        answerText = await startListening();
-      } catch (e) {
-        // Fallback: let them type
-        document.getElementById('voice-status-text').textContent =
-          'Speech recognition unavailable — type your answer and click Skip to proceed.';
-        answerText = await waitForSkipOrType();
-      }
-      const answerEndTime = new Date().toISOString();
-      const durationSec = Math.max(1, Math.round(
-        (new Date(answerEndTime) - new Date(answerStartTime)) / 1000
-      ));
 
-      answers.push({
-        question: q,
-        answer: answerText || '(no response)',
-        start_time: answerStartTime,
-        end_time: answerEndTime,
-        duration: durationSec,
-      });
-      document.getElementById('voice-status-text').textContent = 'Moving to next question...';
-      await sleep(800);
-    }
+/* ================= CODING QUESTION DETECTOR ================= */
 
-    await evaluateAll();
-  }
+function isCodingQuestion(question){
 
-  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+const keywords=[
+"write a function",
+"write code",
+"algorithm",
+"leetcode",
+"array",
+"string",
+"hashmap",
+"python",
+"java",
+"c++",
+"pseudo"
+];
 
-  // Fallback: wait for user to type and click skip
-  function waitForSkipOrType() {
-    return new Promise(resolve => {
-      const handler = () => {
-        const text = document.getElementById('live-transcript').value.trim();
-        resolve(text);
-      };
-      // Override skip to resolve
-      document.getElementById('btn-skip')._fallbackResolve = handler;
-    });
-  }
+question=question.toLowerCase();
 
-  // =========================================================================
-  // 3. Evaluate all answers
-  // =========================================================================
-  async function evaluateAll() {
-    showPhase(evaluatingPhase);
-    document.getElementById('eval-status').textContent = 'Analyzing your responses — this may take a moment...';
+return keywords.some(k=>question.includes(k));
 
-    console.log('[interview] Submitting for evaluation:', { role: ROLE, level: LEVEL, questions_answers: answers });
+}
 
-    try {
-      const resp = await fetch('/api/interview/evaluate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          role: ROLE,
-          level: LEVEL,
-          questions_answers: answers,
-        }),
-      });
 
-      if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
 
-      // Report is stored server-side; redirect to the report page
-      await resp.json();
-      window.location.href = '/report';
-    } catch (err) {
-      console.error('[evaluate] error:', err);
-      document.getElementById('eval-status').textContent =
-        'Error generating feedback: ' + (err.message || err);
-    }
-  }
+/* ================= CODING TIMER ================= */
 
-  // =========================================================================
-  // 4. Render results
-  // =========================================================================
-  function renderResults(data) {
-    const container = document.getElementById('results-container');
-    const feedbacks = data.feedback_per_question || [];
-    let html = '';
+let timerInterval=null;
 
-    if (!feedbacks.length) {
-      html = '<p style="color:var(--text-muted);">No feedback was generated. Please try again.</p>';
-    }
+function startCodingTimer(seconds){
 
-    feedbacks.forEach((fb, i) => {
-      // Use fields from the structured response; fall back to local answers array
-      const questionText = fb.question || (answers[i] || {}).question || '';
-      const answerText   = fb.candidate_answer || (answers[i] || {}).answer || '';
-      const feedback      = fb.feedback || '';
-      const improved      = fb.improved_answer || '';
+const box=document.getElementById("coding-timer");
+const value=document.getElementById("timer-value");
 
-      html += `
-        <div class="feedback-card">
-          <h3>Q${i + 1}: ${escapeHtml(questionText)}</h3>
-          <p class="your-answer"><strong>Your answer:</strong> ${escapeHtml(answerText)}</p>
-          ${feedback ? `<p><strong>Feedback:</strong> ${escapeHtml(feedback)}</p>` : ''}
-          ${improved ? `<p class="improved"><strong>Improved answer:</strong> ${escapeHtml(improved)}</p>` : ''}
-        </div>`;
-    });
-    container.innerHTML = html;
+box.style.display="block";
 
-    // Improvement tips
-    const tips = data.improvement_tips || [];
-    if (tips.length) {
-      document.getElementById('general-tips').innerHTML =
-        '<h3>General Improvement Tips</h3><ul>' +
-        tips.map(t => `<li>${escapeHtml(typeof t === 'string' ? t : JSON.stringify(t))}</li>`).join('') + '</ul>';
-    }
+let remaining=seconds;
 
-    // Learning resources — now objects with {topic, resource}
-    const resources = data.learning_resources || [];
-    if (resources.length) {
-      document.getElementById('resources').innerHTML =
-        '<h3>Recommended Learning Resources</h3><ul>' +
-        resources.map(r => {
-          if (typeof r === 'object' && r.topic) {
-            const desc = r.resource ? ` — ${escapeHtml(r.resource)}` : '';
-            return `<li><strong>${escapeHtml(r.topic)}</strong>${desc}</li>`;
-          }
-          return `<li>${escapeHtml(typeof r === 'string' ? r : JSON.stringify(r))}</li>`;
-        }).join('') + '</ul>';
-    }
-  }
+value.textContent=remaining;
 
-  function escapeHtml(str) {
-    const d = document.createElement('div');
-    d.textContent = str;
-    return d.innerHTML;
-  }
+timerInterval=setInterval(()=>{
 
-  // =========================================================================
-  // Button handlers
-  // =========================================================================
-  document.getElementById('btn-skip').addEventListener('click', () => {
-    if (document.getElementById('btn-skip')._fallbackResolve) {
-      document.getElementById('btn-skip')._fallbackResolve();
-      return;
-    }
-    stopListening();
-  });
+remaining--;
 
-  document.getElementById('btn-end-early').addEventListener('click', async () => {
-    stopListening();
-    // Push any remaining transcript with timing
-    const partial = document.getElementById('live-transcript').value.trim();
-    if (currentIdx < questions.length) {
-      const endNow = new Date().toISOString();
-      const startT = answerStartTime || endNow;
-      const dur = Math.max(1, Math.round(
-        (new Date(endNow) - new Date(startT)) / 1000
-      ));
-      answers.push({
-        question: questions[currentIdx],
-        answer: partial || '(no response)',
-        start_time: startT,
-        end_time: endNow,
-        duration: dur,
-      });
-    }
-    // Skip remaining questions
-    currentIdx = questions.length;
-    await evaluateAll();
-  });
+value.textContent=remaining;
 
-  // =========================================================================
-  // Init
-  // =========================================================================
-  (async function init() {
-    try {
-      questions = await fetchQuestions();
-      if (!questions.length) throw new Error('No questions received');
-      document.getElementById('loading-status').textContent = 'Questions ready! Starting interview...';
-      await sleep(600);
-      await runInterview();
-    } catch (err) {
-      document.getElementById('loading-status').textContent =
-        'Error loading questions: ' + (err.message || err);
-    }
-  })();
+if(remaining<=0){
+
+clearInterval(timerInterval);
+
+}
+
+},1000);
+
+}
+
+function stopCodingTimer(){
+
+if(timerInterval) clearInterval(timerInterval);
+
+document.getElementById("coding-timer").style.display="none";
+
+}
+
+
+
+/* ================= SPEECH RECOGNITION ================= */
+
+const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
+
+function startListening(){
+
+return new Promise((resolve,reject)=>{
+
+if(!SpeechRecognition){
+reject(new Error("Speech recognition not supported"));
+return;
+}
+
+recognition=new SpeechRecognition();
+
+recognition.continuous=true;
+recognition.interimResults=true;
+recognition.lang="en-US";
+
+let finalTranscript="";
+let silenceTimer=null;
+
+const SILENCE_TIMEOUT=10000; // increased silence tolerance
+
+const transcript=document.getElementById("live-transcript");
+const statusText=document.getElementById("voice-status-text");
+const ring=document.getElementById("voice-ring");
+
+recognition.onstart=()=>{
+isListening=true;
+statusText.textContent="Listening...";
+ring.classList.add("active");
+};
+
+recognition.onresult=(event)=>{
+
+clearTimeout(silenceTimer);
+
+let interim="";
+
+for(let i=event.resultIndex;i<event.results.length;i++){
+
+if(event.results[i].isFinal){
+
+finalTranscript+=event.results[i][0].transcript+" ";
+
+}else{
+
+interim+=event.results[i][0].transcript;
+
+}
+
+}
+
+transcript.value=finalTranscript+interim;
+
+silenceTimer=setTimeout(()=>{
+
+recognition.stop();
+
+},SILENCE_TIMEOUT);
+
+};
+
+recognition.onend=()=>{
+
+isListening=false;
+ring.classList.remove("active");
+
+resolve(finalTranscript.trim());
+
+};
+
+recognition.start();
+
+});
+
+}
+
+function stopListening(){
+
+if(recognition&&isListening){
+
+recognition.stop();
+
+}
+
+}
+
+
+
+/* ================= INTERVIEW LOOP ================= */
+
+async function runInterview(){
+
+document.getElementById("loading-phase").style.display="none";
+document.getElementById("interview-phase").style.display="block";
+
+for(currentIdx=0;currentIdx<questions.length;currentIdx++){
+
+const q=questions[currentIdx];
+
+document.getElementById("question-counter").textContent=`Question ${currentIdx+1} / ${questions.length}`;
+
+document.getElementById("current-question").textContent=q;
+
+document.getElementById("live-transcript").value="";
+
+await speak(q);
+
+
+
+/* coding question thinking time */
+
+if(isCodingQuestion(q)){
+
+startCodingTimer(120);
+
+await new Promise(r=>setTimeout(r,120000));
+
+stopCodingTimer();
+
+}
+
+
+
+answerStartTime=new Date().toISOString();
+
+let answerText="";
+
+try{
+
+answerText=await startListening();
+
+}catch(e){
+
+answerText="";
+
+}
+
+const answerEndTime=new Date().toISOString();
+
+const duration=Math.max(1,Math.round((new Date(answerEndTime)-new Date(answerStartTime))/1000));
+
+answers.push({
+
+question:q,
+answer:answerText||"(no response)",
+start_time:answerStartTime,
+end_time:answerEndTime,
+duration:duration
+
+});
+
+}
+
+evaluateAll();
+
+}
+
+
+
+/* ================= API ================= */
+
+async function fetchQuestions(){
+
+const resp=await fetch(`/api/interview/questions?role=${encodeURIComponent(ROLE)}&level=${encodeURIComponent(LEVEL)}&count=${TOTAL_QUESTIONS}`);
+
+const data=await resp.json();
+
+return data.questions||[];
+
+}
+
+
+
+async function evaluateAll(){
+
+document.getElementById("interview-phase").style.display="none";
+document.getElementById("evaluating-phase").style.display="block";
+
+await fetch("/api/interview/evaluate",{
+
+method:"POST",
+headers:{"Content-Type":"application/json"},
+
+body:JSON.stringify({
+
+role:ROLE,
+level:LEVEL,
+questions_answers:answers
+
+})
+
+});
+
+window.location.href="/report";
+
+}
+
+
+
+/* ================= INIT ================= */
+
+(async function(){
+
+try{
+
+questions=await fetchQuestions();
+
+if(!questions.length) throw new Error("No questions");
+
+document.getElementById("loading-status").textContent="Starting interview...";
+
+setTimeout(runInterview,600);
+
+}catch(err){
+
+document.getElementById("loading-status").textContent="Error loading questions";
+
+}
 
 })();
+
+})();
+
 </script>
 
 </body>
