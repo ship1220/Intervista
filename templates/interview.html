@@ -23,8 +23,6 @@ Logged in as <b>{{ username }}</b>
 
 <main>
 
-<!-- ================= LOADING ================= -->
-
 <section id="loading-phase" class="card">
 
 <h2>{{ role }} — {{ level }}</h2>
@@ -38,29 +36,19 @@ Logged in as <b>{{ username }}</b>
 
 
 
-<!-- ================= INTERVIEW ================= -->
-
 <section id="interview-phase" class="card" style="display:none;">
 
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-
 <h2>{{ role }} — {{ level }}</h2>
-
 <span class="badge" id="question-counter">Question 1 / 5</span>
-
 </div>
 
 
 <div id="interviewer-bubble" class="interviewer-bubble">
-
 <div class="bubble-label">AI Interviewer</div>
-
 <p id="current-question"></p>
-
 </div>
 
-
-<!-- CODING TIMER -->
 
 <div id="coding-timer" style="display:none;margin-top:10px;">
 <span>Thinking time: </span>
@@ -79,18 +67,21 @@ Logged in as <b>{{ username }}</b>
 
 <div id="transcript-area" style="margin-top:16px;">
 
-<label style="font-size:0.9rem;">Your answer (live transcript):</label>
+<label style="font-size:0.9rem;">Your answer:</label>
 
 <textarea
 id="live-transcript"
-readonly
-placeholder="Your speech will appear here..."
+placeholder="Type your answer or code here..."
 style="min-height:80px;opacity:0.85;"></textarea>
 
 </div>
 
 
 <div style="margin-top:16px;display:flex;gap:12px;flex-wrap:wrap;">
+
+<button id="btn-submit-code" class="btn" style="display:none;width:160px;">
+Submit Answer
+</button>
 
 <button id="btn-skip" class="btn outline" style="width:140px;">Skip Question</button>
 
@@ -101,8 +92,6 @@ style="min-height:80px;opacity:0.85;"></textarea>
 </section>
 
 
-
-<!-- ================= EVALUATING ================= -->
 
 <section id="evaluating-phase" class="card" style="display:none;">
 
@@ -127,19 +116,73 @@ const ROLE="{{ role }}";
 const LEVEL="{{ level }}";
 const TOTAL_QUESTIONS=5;
 
-
-
 let questions=[];
 let answers=[];
 let currentIdx=0;
 
 let recognition=null;
 let isListening=false;
-let answerStartTime=null;
+let answerSubmitted=false;
+let typingTimer=null;
+let isCodingMode=false;
+
+
+/* BUTTONS */
+
+document.getElementById("btn-skip").onclick = () => {
+
+if(answerSubmitted) return;
+
+answerSubmitted=true;
+
+stopListening();
+
+answers.push({
+question: questions[currentIdx],
+answer: "(skipped)",
+duration:0
+});
+
+currentIdx++;
+
+showQuestion();
+
+};
+
+
+document.getElementById("btn-end-early").onclick = () => {
+
+stopListening();
+evaluateAll();
+
+};
+
+
+document.getElementById("btn-submit-code").onclick = () => {
+
+if(answerSubmitted) return;
+
+answerSubmitted=true;
+
+stopCodingTimer();
+
+const answer=document.getElementById("live-transcript").value.trim();
+
+answers.push({
+question:questions[currentIdx],
+answer:answer||"(no response)",
+duration:120
+});
+
+currentIdx++;
+
+showQuestion();
+
+};
 
 
 
-/* ================= SPEECH SYNTHESIS ================= */
+/* SPEECH SYNTHESIS */
 
 function speak(text){
 
@@ -165,7 +208,7 @@ window.speechSynthesis.speak(utter);
 
 
 
-/* ================= CODING QUESTION DETECTOR ================= */
+/* CODING DETECTOR */
 
 function isCodingQuestion(question){
 
@@ -173,14 +216,17 @@ const keywords=[
 "write a function",
 "write code",
 "algorithm",
-"leetcode",
-"array",
-"string",
-"hashmap",
-"python",
-"java",
-"c++",
-"pseudo"
+"pseudo",
+"write a program",
+"write code",
+"implement",
+"code a function",
+"solve this problem using code",
+"leetcode style",
+"return the output",
+"implement an algorithm",
+"code",
+"program"
 ];
 
 question=question.toLowerCase();
@@ -191,7 +237,7 @@ return keywords.some(k=>question.includes(k));
 
 
 
-/* ================= CODING TIMER ================= */
+/* CODING TIMER */
 
 let timerInterval=null;
 
@@ -209,18 +255,16 @@ value.textContent=remaining;
 timerInterval=setInterval(()=>{
 
 remaining--;
-
 value.textContent=remaining;
 
 if(remaining<=0){
-
 clearInterval(timerInterval);
-
 }
 
 },1000);
 
 }
+
 
 function stopCodingTimer(){
 
@@ -232,18 +276,15 @@ document.getElementById("coding-timer").style.display="none";
 
 
 
-/* ================= SPEECH RECOGNITION ================= */
+/* SPEECH RECOGNITION */
 
 const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
 
 function startListening(){
 
-return new Promise((resolve,reject)=>{
+if(isCodingMode) return;
 
-if(!SpeechRecognition){
-reject(new Error("Speech recognition not supported"));
-return;
-}
+if(!SpeechRecognition) return;
 
 recognition=new SpeechRecognition();
 
@@ -254,7 +295,7 @@ recognition.lang="en-US";
 let finalTranscript="";
 let silenceTimer=null;
 
-const SILENCE_TIMEOUT=10000; // increased silence tolerance
+const SILENCE_TIMEOUT=8000;
 
 const transcript=document.getElementById("live-transcript");
 const statusText=document.getElementById("voice-status-text");
@@ -275,126 +316,153 @@ let interim="";
 for(let i=event.resultIndex;i<event.results.length;i++){
 
 if(event.results[i].isFinal){
-
 finalTranscript+=event.results[i][0].transcript+" ";
-
 }else{
-
 interim+=event.results[i][0].transcript;
-
 }
 
 }
 
 transcript.value=finalTranscript+interim;
 
+if(!isCodingMode){
 silenceTimer=setTimeout(()=>{
-
-recognition.stop();
-
+finishAnswer();
 },SILENCE_TIMEOUT);
+}
 
 };
 
 recognition.onend=()=>{
-
 isListening=false;
 ring.classList.remove("active");
-
-resolve(finalTranscript.trim());
-
 };
 
 recognition.start();
 
-});
-
 }
+
 
 function stopListening(){
 
-if(recognition&&isListening){
-
+if(recognition && isListening){
 recognition.stop();
-
 }
 
 }
 
 
 
-/* ================= INTERVIEW LOOP ================= */
+/* TYPING INACTIVITY */
+
+const transcriptBox=document.getElementById("live-transcript");
+
+transcriptBox.addEventListener("input",()=>{
+
+if(isCodingMode) return;
+
+clearTimeout(typingTimer);
+
+typingTimer=setTimeout(()=>{
+
+finishAnswer();
+
+},10000);
+
+});
+
+
+
+/* INTERVIEW FLOW */
 
 async function runInterview(){
 
 document.getElementById("loading-phase").style.display="none";
 document.getElementById("interview-phase").style.display="block";
 
-for(currentIdx=0;currentIdx<questions.length;currentIdx++){
+showQuestion();
 
-const q=questions[currentIdx];
+}
 
-document.getElementById("question-counter").textContent=`Question ${currentIdx+1} / ${questions.length}`;
 
-document.getElementById("current-question").textContent=q;
+
+function showQuestion(){
+if(isCodingMode){
+stopListening();
+}
+answerSubmitted=false;
+
+if(currentIdx >= questions.length){
+evaluateAll();
+return;
+}
+
+const qObj = questions[currentIdx];
+const q = typeof qObj === "string" ? qObj : qObj.question;
+
+document.getElementById("question-counter").textContent =
+`Question ${currentIdx+1} / ${questions.length}`;
+
+document.getElementById("current-question").textContent = q;
 
 document.getElementById("live-transcript").value="";
 
-await speak(q);
+clearTimeout(typingTimer);
 
+isCodingMode = isCodingQuestion(q);
 
+document.getElementById("btn-submit-code").style.display =
+isCodingMode ? "inline-block" : "none";
 
-/* coding question thinking time */
+speak(q).then(()=>{
 
-if(isCodingQuestion(q)){
+if(isCodingMode){
 
-startCodingTimer(120);
+// Coding question
+// Do NOT start listening
+// Do NOT start timer
+// User will manually submit
 
-await new Promise(r=>setTimeout(r,120000));
+}else{
 
-stopCodingTimer();
-
-}
-
-
-
-answerStartTime=new Date().toISOString();
-
-let answerText="";
-
-try{
-
-answerText=await startListening();
-
-}catch(e){
-
-answerText="";
+// Non-coding question
+startListening();
 
 }
-
-const answerEndTime=new Date().toISOString();
-
-const duration=Math.max(1,Math.round((new Date(answerEndTime)-new Date(answerStartTime))/1000));
-
-answers.push({
-
-question:q,
-answer:answerText||"(no response)",
-start_time:answerStartTime,
-end_time:answerEndTime,
-duration:duration
 
 });
 
 }
 
-evaluateAll();
+
+
+function finishAnswer(){
+
+if(answerSubmitted) return;
+
+answerSubmitted=true;
+
+clearTimeout(typingTimer);
+
+stopListening();
+
+const answer=document.getElementById("live-transcript").value.trim();
+
+answers.push({
+question:questions[currentIdx],
+answer:answer||"(no response)",
+duration:30
+});
+
+currentIdx++;
+
+showQuestion();
 
 }
 
 
 
-/* ================= API ================= */
+/* API */
 
 async function fetchQuestions(){
 
@@ -434,7 +502,7 @@ window.location.href="/report";
 
 
 
-/* ================= INIT ================= */
+/* INIT */
 
 (async function(){
 

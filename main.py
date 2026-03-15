@@ -3,8 +3,10 @@
 import io
 import json
 import re
+import time
+from pathlib import Path
 import models
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request, Form, Depends, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,9 +16,19 @@ from passlib.context import CryptContext
 from ai_service import transcribe_audio
 from sse_starlette.sse import EventSourceResponse
 from database import Base, engine
-
+Base.metadata.create_all(bind=engine)
+import os
+import shutil
+UPLOAD_DIR = "uploads"
 from database import SessionLocal
-from models import User, InterviewAttempt, SkillProgress
+from models import (
+    User,
+    InterviewAttempt,
+    SkillProgress,
+    UserProfile,
+    Interview,
+    UserSkillProfileRow,
+)
 from ai_service import (
     generate_content, extract_json, evaluate_answers,
     analyze_speech_delivery, compute_confidence_score,
@@ -30,6 +42,54 @@ from prompts import (
     course_outline_prompt,
     course_module_detail_prompt,
 )
+from prompts import resume_skill_profile_prompt
+from user_skill_profile import (
+    BasicUserInfo,
+    ResumeData,
+    UserSkillProfile,
+    UserSkillVector,
+    InterviewRecord,
+    ScoreBreakdown,
+    create_user_profile,
+    detect_weaknesses,
+    recommend_micro_courses,
+    update_skill_score,
+    update_skill_vector,
+    calculate_overall_score,
+    record_interview_result,
+)
+
+# ------------------------------------------------------------------
+# Helper Functions
+# ------------------------------------------------------------------
+def categorize_weak_topics(weak_topics: list[str]) -> dict[str, list[str]]:
+
+    technical = []
+    communication = []
+
+    for topic in weak_topics:
+        t = topic.lower()
+
+        if any(k in t for k in [
+            "sql","database","python","algorithm","data structure",
+            "machine learning","statistics","api","system design"
+        ]):
+            technical.append(topic)
+
+        elif any(k in t for k in [
+            "explain","clarity","structure","communication",
+            "example","confidence","detail","depth"
+        ]):
+            communication.append(topic)
+
+        else:
+            # fallback
+            technical.append(topic)
+
+    return {
+        "Technical Skills": list(set(technical)),
+        "Communication & Answer Quality": list(set(communication))
+    }
 
 # ===========================================================================
 # APP INIT
@@ -48,6 +108,11 @@ resume_store: dict[str, str] = {}
 
 # In-memory report store (latest report per user)
 report_store: dict[str, dict] = {}
+
+# In-memory store for short-lived Groq/Grok API keys, keyed by username.
+# This is NOT persisted to the database and is cleared on logout and
+# after an interview completes.
+grok_session_keys: dict[str, str] = {}
 
 # ===========================================================================
 # DATABASE DEPENDENCY
@@ -115,6 +180,82 @@ def verify_password(plain: str, hashed: str):
     except Exception:
         return False
 
+
+def get_or_create_user_profile(db: Session, user: User) -> UserProfile:
+    """
+    Ensure a UserProfile row exists for the given auth user.
+
+    This keeps creation logic in one place and can be reused from
+    login, resume upload, and interview flows.
+    """
+    profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
+    if profile:
+        return profile
+
+    profile = UserProfile(
+        user_id=user.id,
+        email=user.username,  # treat username as email by default
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+# ---------------------------------------------------------------------------
+# User Skill Profile helpers (DB-backed skill vector)
+# ---------------------------------------------------------------------------
+
+def get_skill_profile(db: Session, user_id: int):
+    """Fetch the user skill profile row, or None if it doesn't exist."""
+    return db.query(UserSkillProfileRow).filter(UserSkillProfileRow.user_id == user_id).first()
+
+
+def create_skill_profile(db: Session, user_id: int) -> UserSkillProfileRow:
+    """Create a new skill profile row for a user (no-op if already exists)."""
+    profile = get_skill_profile(db, user_id)
+    if profile:
+        return profile
+
+    profile = UserSkillProfileRow(
+        user_id=user_id,
+        technical_skills={},
+        interview_skills={},
+        communication_skills={},
+        overall_score=0.0,
+        interview_count=0,
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+def update_skill_profile(db: Session, user_id: int, skill_data: dict) -> UserSkillProfileRow:
+    """Update an existing skill profile row with the provided skill data."""
+    profile = get_skill_profile(db, user_id)
+    if not profile:
+        profile = create_skill_profile(db, user_id)
+
+    # Update fields if provided
+    if "technical_skills" in skill_data:
+        profile.technical_skills = skill_data["technical_skills"]
+    if "interview_skills" in skill_data:
+        profile.interview_skills = skill_data["interview_skills"]
+    if "communication_skills" in skill_data:
+        profile.communication_skills = skill_data["communication_skills"]
+    if "overall_score" in skill_data:
+        profile.overall_score = float(skill_data["overall_score"])
+    if "interview_count" in skill_data:
+        profile.interview_count = int(skill_data["interview_count"])
+
+    profile.last_updated = datetime.utcnow()
+
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return profile
+
 # ===========================================================================
 # PAGE ROUTES
 # ===========================================================================
@@ -156,15 +297,48 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
             {"request": request, "message": "Invalid credentials"}
         )
 
+    # Ensure a profile row exists for this user.
+    get_or_create_user_profile(db, user)
+
     resp = RedirectResponse("/index", status_code=303)
     resp.set_cookie(key="user", value=username, httponly=True)
     return resp
 
 @app.get("/logout")
-def logout():
+def logout(request: Request, db: Session = Depends(get_db)):
+    """
+    Log the user out and clear any short-lived secrets such as Grok API keys.
+    """
+    user = get_current_user(request, db)
+    if user:
+        grok_session_keys.pop(user.username, None)
+
     resp = RedirectResponse("/")
     resp.delete_cookie("user")
     return resp
+
+@app.post("/update-resume")
+def update_resume(request: Request, file: UploadFile, db: Session = Depends(get_db)):
+
+    user = get_current_user(request, db)
+
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+    file_location = os.path.join(UPLOAD_DIR, f"{user.id}_{file.filename}")
+
+    with open(file_location, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
+
+    if profile:
+        profile.resume_file_path = file_location
+        db.commit()
+
+    return RedirectResponse("/profile", status_code=303)
 
 @app.get("/index", response_class=HTMLResponse)
 def index(request: Request, db: Session = Depends(get_db)):
@@ -181,17 +355,30 @@ def progress_page(request: Request, db: Session = Depends(get_db)):
     skills = db.query(SkillProgress).filter(SkillProgress.user_id == user.id).all()
     return templates.TemplateResponse("progress.html", {"request": request, "username": user.username, "skills": skills})
 
+
+@app.get("/progress/", response_class=HTMLResponse)
+def progress_page_slash(request: Request, db: Session = Depends(get_db)):
+    """Support both /progress and /progress/ URLs."""
+    return progress_page(request, db)
+
 # ===========================================================================
 # RESUME UPLOAD
 # ===========================================================================
 @app.post("/api/upload_resume")
-async def upload_resume(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_resume(
+    request: Request,
+    file: UploadFile = File(...),
+    role: str = Form(...),
+    level: str = Form(...),
+    db: Session = Depends(get_db),
+):
     user = get_current_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
 
     content = await file.read()
-    filename = (file.filename or "").lower()
+    original_name = file.filename or "resume"
+    filename = original_name.lower()
     text = ""
 
     if filename.endswith(".pdf"):
@@ -209,9 +396,88 @@ async def upload_resume(request: Request, file: UploadFile = File(...), db: Sess
     if not text:
         raise HTTPException(status_code=400, detail="Could not extract text from the file")
 
+    # Persist raw text in memory for question generation
     resume_store[user.username] = text
+
+    # Persist file to disk for later download from profile
+    upload_dir = Path("uploads")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = f"user_{user.id}_{int(time.time())}_{original_name}"
+    file_path = upload_dir / safe_name
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # Create / update structured skill profile using the resume
+    profile_row = get_or_create_user_profile(db, user)
+
+    # Ask LLM for compact skill profile
+    try:
+        from ai_service import generate_content, extract_json
+
+        prompt = resume_skill_profile_prompt(text, role, level)
+        raw = await generate_content(prompt, use_cache=False, json_mode=True)
+        parsed = extract_json(raw)
+    except Exception as exc:
+        print("[resume] skill profile generation error:", exc)
+        parsed = {}
+
+    skills = parsed.get("skills") if isinstance(parsed, dict) else None
+    if not isinstance(skills, list):
+        skills = []
+    skills = [str(s).strip() for s in skills if str(s).strip()]
+
+    skill_gaps = parsed.get("skill_gaps") if isinstance(parsed, dict) else None
+    if not isinstance(skill_gaps, list):
+        skill_gaps = []
+    skill_gaps = [str(s).strip() for s in skill_gaps if str(s).strip()]
+
+    improvement_suggestions = (
+        parsed.get("improvement_suggestions") if isinstance(parsed, dict) else ""
+    ) or ""
+
+    strength_pct = 0.0
+    if isinstance(parsed, dict):
+        try:
+            strength_pct = float(parsed.get("strength_percentage", 0.0))
+        except (TypeError, ValueError):
+            strength_pct = 0.0
+
+    # Build Pydantic UserSkillProfile
+    basic_info = BasicUserInfo(
+        user_id=str(user.id),
+        name=user.username,
+        target_role=role,
+        experience_level=level,
+        resume_file_path=str(file_path),
+    )
+    resume_data = ResumeData(skills=skills)
+    profile_obj: UserSkillProfile = create_user_profile(basic_info, resume_data)
+
+    # Detect weaknesses based on initial profile (may be empty at this stage)
+    detect_weaknesses(profile_obj)
+
+    profile_row.role_applied_for = role
+    profile_row.current_designation = level
+    profile_row.resume_file_path = str(file_path)
+    profile_row.extracted_skills = json.dumps(skills)
+    profile_row.skill_strength_percentage = strength_pct
+    profile_row.skill_gaps = json.dumps(skill_gaps)
+    profile_row.improvement_suggestions = improvement_suggestions
+    profile_row.profile_json = profile_obj.json()
+    profile_row.updated_at = datetime.utcnow()
+
+    db.add(profile_row)
+    db.commit()
+
     print(f"[resume] Stored {len(text)} chars for user {user.username}")
-    return {"status": "ok", "length": len(text), "preview": text[:200]}
+    return {
+        "status": "ok",
+        "length": len(text),
+        "preview": text[:200],
+        "skills": skills,
+        "skill_gaps": skill_gaps,
+        "strength_percentage": strength_pct,
+    }
 
 # ===========================================================================
 # AUDIO TRANSCRIPTION (Whisper)
@@ -238,10 +504,31 @@ async def transcribe_endpoint(file: UploadFile = File(...)):
 # INTERVIEW — START (returns page for voice interview)
 # ===========================================================================
 @app.post("/start_interview/", response_class=HTMLResponse)
-def start_interview_page(request: Request, role: str = Form(...), level: str = Form(...), db: Session = Depends(get_db)):
+def start_interview_page(
+    request: Request,
+    role: str = Form(...),
+    level: str = Form(...),
+    grok_api_key: str = Form(...),
+    db: Session = Depends(get_db),
+):
     user = get_current_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
+
+    grok_api_key = (grok_api_key or "").strip()
+    if not grok_api_key:
+        # Prevent starting interview without an API key
+        return templates.TemplateResponse(
+            "index.html",
+            {
+                "request": request,
+                "username": user.username,
+                "error": "Grok API key is required to start the interview.",
+            },
+        )
+
+    # Store short-lived API key in memory, not in the database.
+    grok_session_keys[user.username] = grok_api_key
     return templates.TemplateResponse("interview.html", {
         "request": request,
         "username": user.username,
@@ -253,54 +540,105 @@ def start_interview_page(request: Request, role: str = Form(...), level: str = F
 # INTERVIEW API — Generate questions (called by JS after page loads)
 # ===========================================================================
 @app.get("/api/interview/questions")
-async def api_interview_questions(request: Request, role: str, level: str, count: int = 2, db: Session = Depends(get_db)):
+async def api_interview_questions(
+    request: Request,
+    role: str,
+    level: str,
+    count: int = 5,
+    db: Session = Depends(get_db)
+):
+
     user = get_current_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
 
+    api_key = grok_session_keys.get(user.username)
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Missing Grok API key for this session.")
+
     resume_text = resume_store.get(user.username, "")
+
     if resume_text:
         prompt = interview_questions_with_resume_prompt(role, level, resume_text, count)
-        print("i reached here")
     else:
         prompt = interview_questions_prompt(role, level, count)
-    raw = await generate_content(prompt, use_cache=False, json_mode=True)
+
+    raw = await generate_content(prompt, use_cache=False, json_mode=True, api_key=api_key)
+
+    raw = raw.strip()
+
     print(f"[questions] Raw response length: {len(raw) if raw else 0}")
-    if raw and raw.strip():
+    if raw:
         print(f"[questions] Raw preview: {raw[:300]}")
 
-    questions = []  # default to empty; filled below or replaced by static fallback
+    # Fix truncated JSON arrays
+    if raw.startswith("[") and not raw.endswith("]"):
+        raw += "]"
 
-    if not raw or not raw.strip():
-        print("[questions] Empty response from AI — will use static fallback")
+    questions = []
+
+    if not raw:
+        print("[questions] Empty AI response — using fallback")
+
     else:
         try:
             questions_data = extract_json(raw)
             print(f"[questions] Extracted type: {type(questions_data).__name__}")
 
-            # Handle direct array and {"questions": [...]} formats
             if isinstance(questions_data, list):
                 questions = questions_data
+
             elif isinstance(questions_data, dict):
-                for key in ("questions", "question"):
-                    if key in questions_data and isinstance(questions_data[key], list):
-                        questions = questions_data[key]
-                        break
+
+                if "questions" in questions_data:
+                    questions = questions_data["questions"]
+
+                elif "question" in questions_data:
+                    questions = questions_data["question"]
+
                 else:
-                    # Try any key that has a list value
                     for key in questions_data:
                         if isinstance(questions_data[key], list):
                             questions = questions_data[key]
                             break
 
-            # Ensure every item is a string
-            questions = [str(q) for q in questions if q] if isinstance(questions, list) else []
+            cleaned_questions = []
+
+            if isinstance(questions, list):
+
+                for q in questions:
+
+                    if isinstance(q, str):
+                        cleaned_questions.append(q)
+
+                    elif isinstance(q, dict):
+
+                        if "question" in q:
+                            cleaned_questions.append(str(q["question"]))
+
+                        elif "text" in q:
+                            cleaned_questions.append(str(q["text"]))
+
+            questions = cleaned_questions[:count]
+
             print(f"[questions] Extracted {len(questions)} questions")
+
         except Exception as e:
-            print(f"[questions] Extraction error: {e}")
-            # Last-resort: split by newlines and filter for question marks
-            questions = [q.strip().lstrip("0123456789.)- ") for q in raw.strip().split("\n") if q.strip()]
-            questions = [q for q in questions if q.endswith("?")][:count]
+
+            print(f"[questions] JSON extraction failed: {e}")
+
+            matches = re.findall(r'"question"\s*:\s*"([^"]+)"', raw)
+
+            if matches:
+                questions = matches[:count]
+                print(f"[questions] Extracted {len(questions)} questions using regex fallback")
+
+            else:
+                questions = [
+                    line.strip().lstrip("0123456789.)- ")
+                    for line in raw.split("\n")
+                    if line.strip().endswith("?")
+                ][:count]
 
     if not questions:
         questions = [
@@ -309,9 +647,8 @@ async def api_interview_questions(request: Request, role: str, level: str, count
             "How do you handle tight deadlines?",
             "Describe a challenging problem you solved recently.",
             "Where do you see yourself in five years?",
-        ]
+        ][:count]
 
-    # Store session
     interview_sessions[user.username] = {
         "role": role,
         "level": level,
@@ -329,6 +666,10 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
     user = get_current_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
+
+    api_key = grok_session_keys.get(user.username)
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Missing Grok API key for this session.")
 
     body = await request.json()
     
@@ -377,7 +718,7 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         confidence = compute_confidence_score(speech_analyses)
 
         # -- FEATURE 3: Content Analysis (LLM) ------------------------
-        content_result = await evaluate_content(role, level, questions_answers)
+        content_result = await evaluate_content(role, level, questions_answers, api_key=api_key)
         print(f"[evaluate] content_result keys: {list(content_result.keys())}")
         content_answers = content_result.get("answers", [])
         print(f"[evaluate] content_answers count: {len(content_answers)}")
@@ -397,36 +738,50 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         candidate_profile = {
             "role": role,
             "level": level,
-            "interview_date": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            "interview_date": datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d %H:%M IST"),
             "total_questions": n,
         }
-
         # -- FEATURE 7: Detailed Answer Report -------------------------
+
         detailed_answers: list[dict] = []
+
         for i, qa in enumerate(questions_answers):
+
             ca = content_answers[i] if i < len(content_answers) else {}
             sa = speech_analyses[i] if i < len(speech_analyses) else {}
-            
-            # Ensure question text is from the input, not from AI response
+
+            # Ensure question text is from input
             question_text = qa.get("question", "")
             answer_text = qa.get("answer", "")
-            
-            # Get feedback from AI response, or use default if missing
-            feedback_text = ca.get("feedback", "")
-            if not feedback_text:
-                feedback_text = "Feedback is being generated. Please check back later."
-            
+
             print(f"[evaluate] Question {i+1}: {question_text[:50]}...")
-            print(f"[evaluate]   Feedback: {feedback_text[:50] if feedback_text else 'MISSING'}...")
-            
+
+            # Normalize strengths
+            strengths = ca.get("strengths", [])
+
+            if isinstance(strengths, str):
+                strengths = [strengths]
+
+            if not strengths:
+                strengths = ["Answer attempted."]
+
+            # Normalize weaknesses
+            weaknesses = ca.get("weaknesses", [])
+
+            if isinstance(weaknesses, str):
+                weaknesses = [weaknesses]
+
+            if not weaknesses:
+                weaknesses = ["Needs improvement."]
+
             detailed_answers.append({
                 "question": question_text,
                 "transcript": answer_text,
                 "score": ca.get("score", 50),
-                "feedback": feedback_text,
-                "strengths": ca.get("strengths", ["Attempted the question."]),
-                "weaknesses": ca.get("weaknesses", ["No major weaknesses detected."]),
+                "strengths": strengths,
+                "weaknesses": weaknesses,
                 "ideal_answer": ca.get("ideal_answer", "No ideal answer generated."),
+                "weak_topics": ca.get("weak_topics", []),
                 "voice_metrics": {
                     "speaking_pace_wpm": sa.get("speaking_pace_wpm", 0),
                     "filler_count": sa.get("filler_word_count", 0),
@@ -449,6 +804,7 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
                 "clarity_score": round(avg_clarity),
                 "engagement_score": round(avg_engagement),
                 "confidence_score": confidence,
+                "total_duration_seconds": round(total_duration, 1),
                 "per_answer": speech_analyses,
             },
             "content_analysis": {
@@ -460,13 +816,6 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
                 "star_method_score": aggregate.get("overall_score", round(content_avg)),
              },
             "detailed_answers": detailed_answers,
-            "session_metadata": {
-                "total_duration_seconds": round(total_duration, 1),
-                "average_speaking_pace_wpm": round(avg_pace, 1),
-                "total_filler_words": total_fillers,
-                "confidence_score": confidence,
-                "weak_topics": content_result.get("weak_topics", [])
-            },
         }
 
         # -- FEATURE 5: Performance Summary ----------------------------
@@ -476,22 +825,170 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         if overall_feedback and overall_feedback.strip():
             report["performance_summary"] = overall_feedback.strip()
         else:
-            summary = await generate_performance_summary(report)
+            summary = await generate_performance_summary(report, api_key=api_key)
             report["performance_summary"] = summary
 
-        # Store report for the /report page
+        # Expose weak topics at the top level for report.html
+        report["weak_topics"] = categorize_weak_topics(content_result.get("weak_topics", []))
+
+        # Store report for the /report page (latest only)
         report_store[user.username] = report
+
+        # Persist high-level interview record with full report JSON
+        interview_row = Interview(
+            user_id=user.id,
+            role=role,
+            date=datetime.utcnow(),
+            score=overall,
+            report_json=json.dumps(report),
+        )
+        db.add(interview_row)
+
+        # Update rich UserSkillProfile based on this interview
+        profile_row = get_or_create_user_profile(db, user)
+        profile_obj: UserSkillProfile
+        try:
+            if profile_row.profile_json:
+                profile_obj = UserSkillProfile.model_validate_json(profile_row.profile_json)
+            else:
+                # Minimal fallback profile if none existed yet
+                basic_info = BasicUserInfo(
+                    user_id=str(user.id),
+                    name=user.username,
+                    target_role=role,
+                    experience_level=level,
+                    resume_file_path=profile_row.resume_file_path or "",
+                )
+                resume_data = ResumeData(skills=[])
+                profile_obj = create_user_profile(basic_info, resume_data)
+        except Exception as exc:
+            print("[profile] error loading existing profile:", exc)
+            basic_info = BasicUserInfo(
+                user_id=str(user.id),
+                name=user.username,
+                target_role=role,
+                experience_level=level,
+                resume_file_path=profile_row.resume_file_path or "",
+            )
+            resume_data = ResumeData(skills=[])
+            profile_obj = create_user_profile(basic_info, resume_data)
+
+        # Record interview per question into profile
+        for i, qa in enumerate(questions_answers):
+            ca = content_answers[i] if i < len(content_answers) else {}
+            topic = role  # Treat role as the main topic/skill for now
+
+            sb = ScoreBreakdown(
+                correctness=float(ca.get("score", 50)),
+                conceptual_depth=float(ca.get("score", 50)),
+                clarity=float(avg_clarity),
+                feedback="",
+            )
+            rec = InterviewRecord(
+                question=qa.get("question", ""),
+                topic=topic,
+                answer_transcript=qa.get("answer", ""),
+                evaluation_score=float(ca.get("score", 50)),
+                score_breakdown=sb,
+            )
+            record_interview_result(profile_obj, rec)
+
+        # Sync weak topics from LLM result
+        weak_from_llm = []
+        for topics in content_result.get("weak_topics", {}).values():
+            weak_from_llm.extend(topics)
+        for w in weak_from_llm:
+            w_norm = w.strip().lower()
+            if w_norm and w_norm not in {t.lower() for t in profile_obj.weak_topics}:
+                profile_obj.weak_topics.append(w)
+
+        # Recompute weaknesses & recommend micro-courses
+        detect_weaknesses(profile_obj)
+        recommend_micro_courses(profile_obj)
+
+        # --------- Update skill vector based on interview metrics ---------
+        def _int(v, default=0):
+            try:
+                return int(round(float(v)))
+            except Exception:
+                return default
+
+        voice = report.get("voice_analysis", {})
+        content = report.get("content_analysis", {})
+
+        interview_metrics = {
+            "relevance": _int(content.get("relevance_score", 0)),
+            "explanation_depth": _int(content.get("depth_score", 0)),
+            "problem_solving": _int(content.get("average_score", 0)),
+            "structured_thinking": _int(content.get("average_score", 0)),
+            "star_method": _int(content.get("star_method_score", 0)),
+
+            "clarity": _int(voice.get("clarity_score", 0)),
+            "confidence": _int(voice.get("confidence_score", 0)),
+            "engagement": _int(voice.get("engagement_score", 0)),
+            "speaking_pace": _int(voice.get("speaking_pace_wpm", 0)),
+            "filler_control": 100 - min(100, _int(voice.get("total_filler_words", 0))),
+}
+
+        # Update the stored skill vector using the interview metrics
+        skill_vector = UserSkillVector(
+            technical_skills=profile_obj.technical_skills,
+            interview_skills=profile_obj.interview_skills,
+            communication_skills=profile_obj.communication_skills,
+        )
+        skill_vector = update_skill_vector(skill_vector, interview_metrics)
+
+        profile_obj.technical_skills = skill_vector.technical_skills
+        profile_obj.interview_skills = skill_vector.interview_skills
+        profile_obj.communication_skills = skill_vector.communication_skills
+        profile_obj.overall_score = calculate_overall_score(skill_vector)
+
+        # Aggregate simple fields for quick display in profile page
+        skills_list = [node.skill_name for node in profile_obj.skill_graph.values()]
+        if profile_obj.skill_graph:
+            avg_score = sum(n.score for n in profile_obj.skill_graph.values()) / len(
+                profile_obj.skill_graph
+            )
+        else:
+            avg_score = overall
+
+        profile_row.role_applied_for = role
+        profile_row.current_designation = level
+        profile_row.extracted_skills = json.dumps(skills_list)
+        profile_row.skill_strength_percentage = float(profile_obj.overall_score)
+        profile_row.skill_gaps = json.dumps(profile_obj.weak_topics)
+        # Use performance summary as latest improvement suggestions snapshot
+        profile_row.improvement_suggestions = report.get("performance_summary", "")
+        profile_row.profile_json = profile_obj.json()
+        profile_row.updated_at = datetime.utcnow()
+
+        # Persist a compact skill vector record for quick access / querying.
+        update_skill_profile(
+            db,
+            user.id,
+            {
+                "technical_skills": profile_obj.technical_skills.dict(),
+                "interview_skills": profile_obj.interview_skills.dict(),
+                "communication_skills": profile_obj.communication_skills.dict(),
+                "overall_score": profile_obj.overall_score,
+                "interview_count": profile_obj.interview_count,
+            },
+        )
+
+        # Return the updated skill profile as part of the report payload.
+        report["skill_profile"] = profile_obj.dict()
+
+        db.add(profile_row)
 
         # Persist answers to DB
         for i, qa in enumerate(questions_answers):
-            fb = detailed_answers[i].get("feedback", "") if i < len(detailed_answers) else ""
             attempt = InterviewAttempt(
                 user_id=user.id,
                 role=role,
                 topic="voice-interview",
                 difficulty=level,
                 answer=qa.get("answer", ""),
-                feedback=fb,
+                feedback="",
             )
             db.add(attempt)
 
@@ -511,6 +1008,10 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
             skill.weak = overall < 50
 
         db.commit()
+
+        # Clear Grok API key after interview is fully processed
+        grok_session_keys.pop(user.username, None)
+
         return report
     
     else:
@@ -527,7 +1028,7 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
 
         # Generate batch evaluation
         prompt = batch_evaluation_prompt(role, answers)
-        raw = await generate_content(prompt, use_cache=False, json_mode=True)
+        raw = await generate_content(prompt, use_cache=False, json_mode=True, api_key=api_key)
 
         print(f"[evaluate] raw AI response length: {len(raw)}")
         print(f"[evaluate] raw AI response (first 500 chars): {raw[:500]}")
@@ -561,7 +1062,7 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
                     {
                         "question": qa.get("question", ""),
                         "candidate_answer": qa.get("answer", ""),
-                        "feedback": "AI evaluation could not be parsed. Please try again.",
+                        "feedback": "",
                         "improved_answer": "",
                     }
                     for qa in answers
@@ -580,8 +1081,6 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
             for src, dst in [
                 ("answer", "candidate_answer"),
                 ("user_answer", "candidate_answer"),
-                ("evaluation", "feedback"),
-                ("comment", "feedback"),
                 ("better_answer", "improved_answer"),
                 ("suggested_answer", "improved_answer"),
                 ("sample_answer", "improved_answer"),
@@ -608,15 +1107,13 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
 
         # Persist each answer to DB
         for i, qa in enumerate(answers):
-            fb_list = evaluation.get("feedback_per_question", [])
-            fb_text = fb_list[i].get("feedback", "") if i < len(fb_list) else ""
             attempt = InterviewAttempt(
                 user_id=user.id,
                 role=role,
                 topic="voice-interview",
                 difficulty="adaptive",
                 answer=qa.get("answer", ""),
-                feedback=fb_text,
+                feedback="",
             )
             db.add(attempt)
 
@@ -644,11 +1141,171 @@ def report_page(request: Request, db: Session = Depends(get_db)):
     report = report_store.get(user.username)
     if not report:
         return RedirectResponse("/index")
-    return templates.TemplateResponse("report.html", {
-        "request": request,
-        "username": user.username,
-        "report": report,
-    })
+    return templates.TemplateResponse(
+        "report.html",
+        {
+            "request": request,
+            "username": user.username,
+            "report": report,
+        },
+    )
+
+
+@app.get("/interview-report/{interview_id}", response_class=HTMLResponse)
+def interview_report_page(
+    request: Request,
+    interview_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    View a past interview report stored in the `interviews` table.
+    """
+    user = get_current_user(request, db)
+    if not user:
+        return RedirectResponse("/login")
+
+    interview = (
+        db.query(Interview)
+        .filter(Interview.id == interview_id, Interview.user_id == user.id)
+        .first()
+    )
+    if not interview:
+        return RedirectResponse("/profile")
+
+    try:
+        report = json.loads(interview.report_json)
+    except Exception:
+        report = {}
+
+    return templates.TemplateResponse(
+        "report.html",
+        {"request": request, "username": user.username, "report": report},
+    )
+
+
+@app.get("/profile", response_class=HTMLResponse)
+def profile_page(request: Request, db: Session = Depends(get_db)):
+
+    user = get_current_user(request, db)
+    if not user:
+        return RedirectResponse("/login")
+
+    profile_row = get_or_create_user_profile(db, user)
+
+    # Default skill profile
+    profile_data = {
+        "technical_skills": {
+            "dsa": 50,
+            "dbms": 50,
+            "operating_systems": 50,
+            "system_design": 50,
+        },
+        "interview_skills": {
+            "relevance": 50,
+            "explanation_depth": 50,
+            "structured_thinking": 50,
+            "problem_solving": 50,
+            "star_method": 50,
+        },
+        "communication_skills": {
+            "clarity": 50,
+            "confidence": 50,
+            "engagement": 50,
+            "speaking_pace": 50,
+            "filler_control": 50,
+        },
+        "overall_score": 50
+    }
+
+    # Load stored skill profile
+    if profile_row.profile_json:
+        try:
+            loaded = json.loads(profile_row.profile_json)
+            profile_data.update(loaded)
+        except Exception:
+            pass
+
+    # Extracted skills
+    extracted_skills = []
+    if profile_row.extracted_skills:
+        try:
+            extracted_skills = json.loads(profile_row.extracted_skills)
+        except:
+            extracted_skills = []
+
+    # Skill gaps
+    skill_gaps = []
+    if profile_row.skill_gaps:
+        try:
+            skill_gaps = json.loads(profile_row.skill_gaps)
+        except:
+            skill_gaps = []
+
+    # Interview history
+    interviews = (
+        db.query(Interview)
+        .filter(Interview.user_id == user.id)
+        .order_by(Interview.date.asc())
+        .all()
+    )
+
+    history_by_role = {}
+    for iv in interviews:
+        history_by_role.setdefault(iv.role, []).append(iv)
+
+    timeline_by_role = {}
+    for role, ivs in history_by_role.items():
+        timeline_by_role[role] = [
+            {
+                "label": iv.date.strftime("%Y-%m-%d"),
+                "score": iv.score
+            }
+            for iv in ivs
+        ]
+
+    return templates.TemplateResponse(
+        "profile.html",
+        {
+            "request": request,
+            "username": user.username,
+            "user_profile": profile_row,
+            "skill_profile": profile_data,
+            "extracted_skills": extracted_skills,
+            "skill_gaps": skill_gaps,
+            "interview_history_by_role": history_by_role,
+            "timeline_by_role": timeline_by_role,
+        },
+    )
+
+@app.get("/interview-history", response_class=HTMLResponse)
+def interview_history_redirect(request: Request):
+    """
+    Simple semantic route that redirects to the profile page where
+    interview history is rendered.
+    """
+    return RedirectResponse("/profile")
+
+
+@app.post("/generate_course/", response_class=HTMLResponse)
+def generate_course_page(
+    request: Request,
+    role: str = Form(...),
+    level: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    user = get_current_user(request, db)
+    if not user:
+        return RedirectResponse("/login")
+
+    return templates.TemplateResponse(
+        "course.html",
+        {
+            "request": request,
+            "username": user.username,
+            "role": role,
+            "level": level,
+        },
+    )
 
 @app.get("/api/course/stream")
 async def api_course_stream(request: Request, role: str, level: str, db: Session = Depends(get_db)):

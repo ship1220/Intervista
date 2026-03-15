@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+
+<html lang="en">
+
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Your Profile</title>
+
+<link rel="stylesheet" href="/static/style.css">
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+</head>
+
+<body>
+
+<header class="page-header">
+
+<h1>Your Profile</h1>
+
+<div class="top-right">
+<a href="/index" class="btn small-btn">Dashboard</a>
+<a href="/logout" class="logout-link">Logout</a>
+</div>
+
+</header>
+
+<main>
+
+<!-- ================================================= -->
+
+<!-- BASIC INFO -->
+
+<!-- ================================================= -->
+
+<section class="card">
+
+<h2>Basic Information</h2>
+
+<div class="profile-info">
+
+<div class="info-row">
+<span class="label">Full Name</span>
+<span class="value">{{ user_profile.first_name or username }} {{ user_profile.last_name or "" }}</span>
+</div>
+
+<div class="info-row">
+<span class="label">Email</span>
+<span class="value">{{ user_profile.email or "Email not available" }}</span>
+</div>
+
+<div class="info-row">
+<span class="label">Role Applied For</span>
+<span class="value">{{ user_profile.role_applied_for or "Not specified" }}</span>
+</div>
+
+<div class="info-row">
+<span class="label">Current Designation</span>
+<span class="value">{{ user_profile.current_designation or "Not specified" }}</span>
+</div>
+
+<div class="resume-section">
+
+<strong>Resume</strong><br>
+
+{% if user_profile.resume_file_path %} <a href="/{{ user_profile.resume_file_path }}" class="btn small-btn" download>Download Resume</a>
+{% endif %}
+
+<form action="/update-resume" method="post" enctype="multipart/form-data">
+<input type="file" name="file" required>
+<button type="submit" class="btn small-btn">Upload New Resume</button>
+</form>
+
+</div>
+
+</div>
+
+</section>
+
+<!-- ================================================= -->
+
+<!-- INTERVIEW READINESS -->
+
+<!-- ================================================= -->
+
+<section class="card">
+
+<h2>Interview Readiness</h2>
+
+<div class="skill-dashboard">
+
+<div class="skill-dashboard-row">
+
+<div class="skill-dashboard-card">
+
+<h3>Overall Score</h3>
+
+<div class="score-box">
+<span id="overall-score">0</span>
+</div>
+
+</div>
+
+<div class="skill-dashboard-card">
+
+<h3>Skill Radar</h3>
+
+<canvas id="skillRadar"></canvas>
+
+</div>
+
+</div>
+
+</div>
+
+</section>
+
+<!-- ================================================= -->
+
+<!-- SKILL BREAKDOWN -->
+
+<!-- ================================================= -->
+
+<section class="card">
+
+<h2>Skill Breakdown</h2>
+
+<div class="skill-breakdown">
+
+<div class="breakdown-column">
+<h3>Technical</h3>
+<div id="technical-skills"></div>
+</div>
+
+<div class="breakdown-column">
+<h3>Interview</h3>
+<div id="interview-skills"></div>
+</div>
+
+<div class="breakdown-column">
+<h3>Communication</h3>
+<div id="communication-skills"></div>
+</div>
+
+</div>
+
+</section>
+
+<!-- ================================================= -->
+
+<!-- PERFORMANCE TIMELINE -->
+
+<!-- ================================================= -->
+
+<section class="card">
+
+<h2>Performance Over Time</h2>
+
+<select id="roleSelector"></select>
+
+<canvas id="performanceChart"></canvas>
+
+</section>
+
+<!-- ================================================= -->
+
+<!-- SKILL GAPS -->
+
+<!-- ================================================= -->
+
+<section class="card">
+
+<h2>Top Skill Gaps</h2>
+
+<div id="top-skill-gaps">
+
+{% if top_skill_gaps %}
+
+{% for gap in top_skill_gaps %}
+
+<div class="skill-row">
+
+<div class="skill-label">{{ gap.name }}</div>
+
+<div class="skill-bar">
+<div class="skill-fill"
+style="width:{{ gap.score }}%;
+background:
+{% if gap.score < 30 %}#e74c3c
+{% elif gap.score < 50 %}#f39c12
+{% else %}#3498db
+{% endif %};">
+</div>
+</div>
+
+<div class="skill-percent">{{ gap.score }}%</div>
+
+</div>
+
+{% endfor %}
+
+{% else %}
+
+<p>No skill gaps detected — all skills above 60%!</p>
+
+{% endif %}
+
+</div>
+
+</section>
+
+<!-- ================================================= -->
+
+<!-- IMPROVEMENT MESSAGE -->
+
+<!-- ================================================= -->
+
+<section class="card">
+
+<h2>Skill Improvement</h2>
+
+<p id="improvementMessage">
+{{ improvement_message or "Keep practicing interviews to improve your profile." }}
+</p>
+
+</section>
+
+<!-- ================================================= -->
+
+<!-- INTERVIEW HISTORY -->
+
+<!-- ================================================= -->
+
+<section class="card">
+
+<h2>Interview History</h2>
+
+{% if interview_history_by_role %}
+
+{% for role, interviews in interview_history_by_role.items() %}
+
+<details class="history-dropdown">
+
+<summary>{{ role }}</summary>
+
+<ul>
+
+{% for iv in interviews %}
+
+<li>
+<a href="/interview-report/{{ iv.id }}">
+Interview — {{ iv.date.strftime("%Y-%m-%d") }}
+(Score: {{ "%.1f"|format(iv.score) }})
+</a>
+</li>
+
+{% endfor %}
+
+</ul>
+
+</details>
+
+{% endfor %}
+
+{% else %}
+
+<p>No interviews recorded yet.</p>
+
+{% endif %}
+
+</section>
+
+</main>
+
+<script>
+
+/* ============================= */
+/* DATA FROM BACKEND */
+/* ============================= */
+
+const skillProfile = {{ skill_profile | tojson | safe }} || {};
+const timelineByRole = {{ timeline_by_role | tojson | safe }} || {};
+
+
+/* ============================= */
+/* HELPERS */
+/* ============================= */
+
+function clamp(v){
+return Math.max(0,Math.min(100,v||0));
+}
+
+function getColor(v){
+
+if(v < 40) return "#e74c3c";
+if(v < 70) return "#f39c12";
+return "#2ecc71";
+
+}
+
+
+/* ============================= */
+/* PROGRESS BAR */
+/* ============================= */
+
+function progressBar(label,value){
+
+const row=document.createElement("div")
+row.className="skill-row"
+
+const l=document.createElement("div")
+l.className="skill-label"
+l.textContent=label
+
+const bar=document.createElement("div")
+bar.className="skill-bar"
+
+const fill=document.createElement("div")
+fill.className="skill-fill"
+fill.style.width=clamp(value)+"%"
+fill.style.background=getColor(value)
+
+const p=document.createElement("div")
+p.className="skill-percent"
+p.textContent=clamp(value)+"%"
+
+bar.appendChild(fill)
+
+row.appendChild(l)
+row.appendChild(bar)
+row.appendChild(p)
+
+return row
+
+}
+
+
+/* ============================= */
+/* SKILL BREAKDOWN */
+/* ============================= */
+
+function renderBreakdown(){
+
+const tech=skillProfile.technical_skills||{}
+const inter=skillProfile.interview_skills||{}
+const comm=skillProfile.communication_skills||{}
+
+const t=document.getElementById("technical-skills")
+const i=document.getElementById("interview-skills")
+const c=document.getElementById("communication-skills")
+
+t.appendChild(progressBar("DSA",tech.dsa))
+t.appendChild(progressBar("DBMS",tech.dbms))
+t.appendChild(progressBar("Operating Systems",tech.operating_systems))
+t.appendChild(progressBar("Computer Networks",tech.computer_networks))
+t.appendChild(progressBar("System Design",tech.system_design))
+
+i.appendChild(progressBar("Relevance",inter.relevance))
+i.appendChild(progressBar("Explanation Depth",inter.explanation_depth))
+i.appendChild(progressBar("Structured Thinking",inter.structured_thinking))
+i.appendChild(progressBar("Problem Solving",inter.problem_solving))
+i.appendChild(progressBar("STAR Method",inter.star_method))
+
+c.appendChild(progressBar("Clarity",comm.clarity))
+c.appendChild(progressBar("Confidence",comm.confidence))
+c.appendChild(progressBar("Engagement",comm.engagement))
+c.appendChild(progressBar("Speaking Pace",comm.speaking_pace))
+c.appendChild(progressBar("Filler Control",comm.filler_control))
+
+}
+
+
+/* ============================= */
+/* RADAR CHART */
+/* ============================= */
+
+function renderRadar(){
+
+const ctx=document.getElementById("skillRadar")
+
+if(!ctx) return
+
+const tech=skillProfile.technical_skills||{}
+const comm=skillProfile.communication_skills||{}
+const inter=skillProfile.interview_skills||{}
+
+if(window._radarChart) window._radarChart.destroy()
+
+window._radarChart = new Chart(ctx,{
+
+type:"radar",
+
+data:{
+labels:[
+"DSA",
+"DBMS",
+"OS",
+"Networks",
+"System Design",
+"Problem Solving",
+"Clarity",
+"Confidence"
+],
+
+datasets:[{
+
+data:[
+clamp(tech.dsa),
+clamp(tech.dbms),
+clamp(tech.operating_systems),
+clamp(tech.computer_networks),
+clamp(tech.system_design),
+clamp(inter.problem_solving),
+clamp(comm.clarity),
+clamp(comm.confidence)
+],
+
+backgroundColor:"rgba(54,162,235,0.2)",
+borderColor:"rgba(54,162,235,1)",
+pointBackgroundColor:"rgba(54,162,235,1)"
+
+}]
+
+},
+
+options:{
+scales:{
+r:{
+min:0,
+max:100,
+ticks:{stepSize:20}
+}
+},
+plugins:{
+legend:{display:false}
+}
+}
+
+})
+
+}
+
+
+/* ============================= */
+/* PERFORMANCE TIMELINE */
+/* ============================= */
+
+function renderTimeline(role){
+
+const data=timelineByRole[role]
+
+if(!data) return
+
+const ctx=document.getElementById("performanceChart")
+
+if(window._timelineChart) window._timelineChart.destroy()
+
+window._timelineChart = new Chart(ctx,{
+
+type:"line",
+
+data:{
+labels:data.map(d=>d.label),
+
+datasets:[{
+label:role+" Performance",
+data:data.map(d=>d.score),
+borderColor:"rgba(54,162,235,1)",
+backgroundColor:"rgba(54,162,235,0.2)",
+tension:0.2,
+fill:true
+}]
+},
+
+options:{
+scales:{
+y:{min:0,max:100}
+}
+}
+
+})
+
+}
+
+
+function initTimeline(){
+
+const selector=document.getElementById("roleSelector")
+
+Object.keys(timelineByRole).forEach(role=>{
+
+const opt=document.createElement("option")
+opt.value=role
+opt.textContent=role
+
+selector.appendChild(opt)
+
+})
+
+selector.addEventListener("change",()=>renderTimeline(selector.value))
+
+if(selector.value) renderTimeline(selector.value)
+
+}
+
+
+/* ============================= */
+/* OVERALL SCORE */
+/* ============================= */
+
+function renderOverall(){
+
+const el=document.getElementById("overall-score")
+
+if(el){
+
+el.textContent=Math.round(skillProfile.overall_score||0)
+
+}
+
+}
+
+
+/* ============================= */
+/* INIT */
+/* ============================= */
+
+function init(){
+
+renderOverall()
+renderRadar()
+renderBreakdown()
+initTimeline()
+
+}
+
+window.onload=init
+
+</script>
+
+</body>
+</html>

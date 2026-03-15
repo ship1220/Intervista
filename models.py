@@ -1,5 +1,15 @@
 
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Text
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    Boolean,
+    ForeignKey,
+    DateTime,
+    Text,
+    Float,
+    JSON,
+)
 from database import Base
 from datetime import datetime
 
@@ -13,6 +23,42 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True)
     password = Column(String)
+
+
+class UserProfile(Base):
+    """
+    Extended user profile data and serialized skill profile.
+
+    This keeps auth credentials (`User`) separate from richer profile info
+    like resume, skill strengths/gaps, and improvement suggestions.
+    """
+
+    __tablename__ = "user_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, index=True)
+
+    # Basic identity
+    first_name = Column(String, nullable=True)
+    last_name = Column(String, nullable=True)
+    email = Column(String, nullable=True)
+
+    # Targeting and resume metadata
+    role_applied_for = Column(String, nullable=True)
+    current_designation = Column(String, nullable=True)
+    resume_file_path = Column(String, nullable=True)
+
+    # Aggregated skill data
+    extracted_skills = Column(Text, nullable=True)  # JSON array of skills
+    skill_strength_percentage = Column(Float, default=0.0)
+    skill_gaps = Column(Text, nullable=True)  # JSON array of weak topics
+    improvement_suggestions = Column(Text, nullable=True)
+
+    # Full serialized UserSkillProfile (Pydantic) for richer analysis
+    profile_json = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 class UserTarget(Base):
@@ -69,6 +115,25 @@ class InterviewAttempt(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
 
 
+class Interview(Base):
+    """
+    High-level record of completed interviews per user and role.
+
+    Stores the overall score and the complete report JSON so that
+    past interviews can be browsed from the profile page.
+    """
+
+    __tablename__ = "interviews"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+
+    role = Column(String, nullable=False)
+    date = Column(DateTime, default=datetime.utcnow, index=True)
+    score = Column(Float, default=0.0)
+    report_json = Column(Text, nullable=False)
+
+
 # =========================
 # COURSE BUILDER
 # =========================
@@ -122,3 +187,23 @@ class QuizAttempt(Base):
 
     wrong_concepts = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# =========================
+# USER SKILL PROFILES
+# =========================
+class UserSkillProfileRow(Base):
+    """Stores the aggregated skill vectors for a user."""
+
+    __tablename__ = "user_skill_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, index=True)
+
+    technical_skills = Column(JSON, nullable=False, default=dict)
+    interview_skills = Column(JSON, nullable=False, default=dict)
+    communication_skills = Column(JSON, nullable=False, default=dict)
+
+    overall_score = Column(Float, default=0.0)
+    interview_count = Column(Integer, default=0)
+    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

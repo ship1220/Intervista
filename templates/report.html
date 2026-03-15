@@ -1,74 +1,90 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interview Performance Report</title>
 <link rel="stylesheet" href="/static/styles.css">
-<title>Interview Performance Report - Job PrepMate</title>
+<link rel="stylesheet" href="/static/report.css">
 </head>
 
 <body>
 
-<header class="page-header">
-<h1>Performance Report</h1>
+ <nav class="navbar">
+  <div class="nav-container">
 
-<div class="top-right">
-Logged in as <b>{{ username }}</b>
-<a href="/index" class="btn small-btn">Dashboard</a>
-<a href="/progress" class="btn small-btn outline">Progress</a>
-<a href="/logout/" class="logout-link">Logout</a>
+    <h2 class="logo">
+      <img src="/static/new_logo.png" alt="Intervista AI logo" class="logo-img">
+      INTERVISTA
+    </h2>
+
+   <div class="nav-links">
+  <a href="/">Home</a>
+  <a href="/#features">Features</a>
+  <a href="/#flow">How it Works</a>
+  <a href="/#contact">Contact</a>
 </div>
 
-</header>
+      <!-- User menu -->
+      <div class="user-menu">
+        <button class="user-avatar" id="userAvatar">
+          <span class="avatar-circle">{{ username[:1] | upper }}</span>
+        </button>
+
+        <div class="user-dropdown" id="userDropdown">
+          <div class="user-dropdown-header">
+            <div class="user-name">{{ username }}</div>
+          </div>
+
+          <a href="/profile" class="dropdown-item">View Profile</a>
+          <a href="/progress/" class="dropdown-item">Progress</a>
+          <a href="/logout" class="dropdown-item danger">Logout</a>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</nav>
+
+<h1>Interview Performance Report</h1>
+
 
 
 <main class="report-main">
 
+{% set score = report.overall_score | default(0) %}
+{% set va = report.voice_analysis | default({}) %}
+{% set ca = report.content_analysis | default({}) %}
 
-<!-- ================= CANDIDATE PROFILE ================= -->
 
-<section class="card fade-in">
+<section class="card fade-in interview-summary">
 
-<h2>Candidate Profile</h2>
+<h2>Interview Summary</h2>
 
-<div class="profile-grid">
+<div class="summary-grid">
 
-<div>
-<strong class="label">Role</strong>
-<br>
-{{ report.candidate_profile.role }}
-</div>
+<!-- Candidate Info -->
 
-<div>
-<strong class="label">Level</strong>
-<br>
-{{ report.candidate_profile.level | capitalize }}
-</div>
+<div class="candidate-info">
 
-<div>
-<strong class="label">Date</strong>
-<br>
-{{ report.candidate_profile.interview_date }}
-</div>
+<p><strong>Role:</strong> {{ report.candidate_profile.role }}</p>
 
-<div>
-<strong class="label">Questions</strong>
-<br>
-{{ report.candidate_profile.total_questions }}
-</div>
+<p><strong>Level:</strong> {{ report.candidate_profile.level | capitalize }}</p>
+
+<p><strong>Date:</strong> {{ report.candidate_profile.interview_date }}</p>
+
+<p><strong>Questions:</strong> {{ report.candidate_profile.total_questions }}</p>
 
 </div>
 
-</section>
 
+<!-- Performance -->
 
-<!-- ================= OVERALL PERFORMANCE ================= -->
+<div class="performance-info">
 
-<section class="card fade-in center">
-
-<h2>Overall Performance</h2>
-
-{% set gauge_color = '#10b981' if report.overall_score >= 70 else '#f59e0b' if report.overall_score >= 50 else '#ef4444' %}
+{% set score = report.overall_score | default(0) %}
+{% set gauge_color = '#10b981' if score >= 70 else '#f59e0b' if score >= 50 else '#ef4444' %}
 
 <div class="score-gauge">
 
@@ -82,66 +98,62 @@ cx="80"
 cy="80"
 r="68"
 stroke-dasharray="427.3"
-stroke-dashoffset="{{ 427.3 - (427.3 * report.overall_score / 100) }}"
+stroke-dashoffset="{{ 427.3 - (427.3 * score / 100) }}"
 style="stroke:{{ gauge_color }};"
 ></circle>
 
 </svg>
 
 <div class="gauge-label">
-<span class="gauge-value" style="color:{{ gauge_color }};">
-{{ report.overall_score }}
+<span class="gauge-value" style="color:{{ gauge_color }}">
+{{ score }}
 </span>
-<span class="gauge-sub">out of 100</span>
+<span class="gauge-sub">/100</span>
 </div>
 
 </div>
 
 
-<div class="verdict-section">
-
-{% set rec = report.verdict.recommendation %}
-
-<span class="verdict-badge {% if rec == 'SHORTLISTED' %}shortlisted{% elif rec == 'BORDERLINE' %}borderline{% else %}reject{% endif %}">
-{{ rec }}
+<span class="verdict-badge
+{% if report.verdict.recommendation == 'SHORTLISTED' %}
+shortlisted
+{% elif report.verdict.recommendation == 'BORDERLINE' %}
+borderline
+{% else %}
+reject
+{% endif %}
+">
+{{ report.verdict.recommendation }}
 </span>
 
 <p class="muted-text">
 Confidence: {{ report.verdict.confidence_level }}
 </p>
 
-</div>
-
-
 {% if report.verdict.suitable_roles %}
-
-<div class="suitable-roles">
-
-<strong class="label">Suitable Roles</strong>
-
 <div class="role-tags">
-
 {% for role in report.verdict.suitable_roles %}
 <span class="role-tag">{{ role }}</span>
 {% endfor %}
-
 </div>
-
-</div>
-
 {% endif %}
+
+</div>
+
+</div>
 
 </section>
 
 
-
-<!-- ================= PERFORMANCE SUMMARY ================= -->
+<!-- ===================================================== -->
+<!-- AI PERFORMANCE SUMMARY -->
+<!-- ===================================================== -->
 
 {% if report.performance_summary %}
 
 <section class="card fade-in">
 
-<h2>Performance Summary</h2>
+<h2>AI Performance Summary</h2>
 
 <div class="summary-text">
 {{ report.performance_summary }}
@@ -153,7 +165,9 @@ Confidence: {{ report.verdict.confidence_level }}
 
 
 
-<!-- ================= WEAK TOPICS ================= -->
+<!-- ===================================================== -->
+<!-- WEAK TOPICS -->
+<!-- ===================================================== -->
 
 <section class="card fade-in">
 
@@ -161,13 +175,22 @@ Confidence: {{ report.verdict.confidence_level }}
 
 {% if report.weak_topics %}
 
-<ul class="weak-topics">
+{% for category, topics in report.weak_topics.items() %}
 
-{% for topic in report.weak_topics %}
-<li>{{ topic }}</li>
+{% if topics %}
+
+<h3>{{ category }}</h3>
+
+<div class="topic-tags">
+
+{% for topic in topics %}
+<span class="topic-tag">{{ topic }}</span>
 {% endfor %}
 
-</ul>
+</div>
+
+{% endif %}
+{% endfor %}
 
 {% else %}
 
@@ -179,7 +202,9 @@ Confidence: {{ report.verdict.confidence_level }}
 
 
 
-<!-- ================= VOICE ANALYSIS ================= -->
+<!-- ===================================================== -->
+<!-- VOICE ANALYSIS -->
+<!-- ===================================================== -->
 
 <section class="card fade-in">
 
@@ -188,27 +213,27 @@ Confidence: {{ report.verdict.confidence_level }}
 <div class="metrics-grid">
 
 <div class="metric-card">
-<div class="metric-value">{{ report.voice_analysis.speaking_pace_wpm }}</div>
+<div class="metric-value">{{ va.speaking_pace_wpm | default(0) }}</div>
 <div class="metric-label">Speaking Pace (WPM)</div>
 </div>
 
 <div class="metric-card">
-<div class="metric-value">{{ report.voice_analysis.total_filler_words }}</div>
+<div class="metric-value">{{ va.filler_word_count | default(0) }}</div>
 <div class="metric-label">Filler Words</div>
 </div>
 
 <div class="metric-card">
-<div class="metric-value">{{ report.voice_analysis.clarity_score }}</div>
+<div class="metric-value">{{ va.clarity_score | default(0) }}</div>
 <div class="metric-label">Clarity</div>
 </div>
 
 <div class="metric-card">
-<div class="metric-value">{{ report.voice_analysis.engagement_score }}</div>
+<div class="metric-value">{{ va.engagement_score | default(0) }}</div>
 <div class="metric-label">Engagement</div>
 </div>
 
 <div class="metric-card">
-<div class="metric-value">{{ report.voice_analysis.confidence_score }}</div>
+<div class="metric-value">{{ va.confidence_score | default(0) }}</div>
 <div class="metric-label">Confidence</div>
 </div>
 
@@ -218,120 +243,60 @@ Confidence: {{ report.verdict.confidence_level }}
 
 
 
-<!-- ================= CONTENT ANALYSIS ================= -->
+<!-- ===================================================== -->
+<!-- CONTENT ANALYSIS -->
+<!-- ===================================================== -->
 
 <section class="card fade-in">
 
 <h2>Content Analysis</h2>
 
-{% set ca = report.content_analysis %}
+{% macro score_bar(label, value) %}
 
 <div class="analysis-block">
 
-<strong>Average Answer Score</strong>
+<strong>{{ label }}</strong>
 
 <div class="score-bar-wrap">
 
 <div class="score-bar">
-<div class="score-bar-fill" style="width:{{ ca.average_score }}%;"></div>
+
+<div class="score-bar-fill"
+style="width:{{ value | default(0) }}%;
+background-color:
+{% if value >= 70 %}
+#22c55e
+{% elif value >= 40 %}
+#f59e0b
+{% else %}
+#ef4444
+{% endif %}
+;">
 </div>
 
-<span class="score-bar-value">{{ ca.average_score }}</span>
-
 </div>
 
-</div>
-
-
-<div class="analysis-block">
-
-<strong>Relevance</strong>
-
-<div class="score-bar-wrap">
-
-<div class="score-bar">
-<div class="score-bar-fill" style="width:{{ ca.relevance_score }}%;"></div>
-</div>
-
-<span class="score-bar-value">{{ ca.relevance_score }}</span>
+<span class="score-bar-value">{{ value | default(0) }}</span>
 
 </div>
 
 </div>
 
-
-<div class="analysis-block">
-
-<strong>Depth of Explanation</strong>
-
-<div class="score-bar-wrap">
-
-<div class="score-bar">
-<div class="score-bar-fill" style="width:{{ ca.depth_score }}%;"></div>
-</div>
-
-<span class="score-bar-value">{{ ca.depth_score }}</span>
-
-</div>
-
-</div>
+{% endmacro %}
 
 
-<div class="analysis-block">
-
-<strong>STAR Method Usage</strong>
-
-<div class="score-bar-wrap">
-
-<div class="score-bar">
-<div class="score-bar-fill" style="width:{{ ca.star_method_score }}%;"></div>
-</div>
-
-<span class="score-bar-value">{{ ca.star_method_score }}</span>
-
-</div>
-
-</div>
+{{ score_bar("Average Answer Score", ca.average_score) }}
+{{ score_bar("Relevance", ca.relevance_score) }}
+{{ score_bar("Depth of Explanation", ca.depth_score) }}
+{{ score_bar("STAR Method Usage", ca.star_method_score) }}
 
 </section>
 
 
 
-<!-- ================= SESSION STATS ================= -->
-
-<section class="card fade-in">
-
-<h2>Session Statistics</h2>
-
-<div class="metrics-grid">
-
-<div class="metric-card">
-<div class="metric-value">{{ report.session_metadata.total_duration_seconds | round(0) | int }}s</div>
-<div class="metric-label">Total Duration</div>
-</div>
-
-<div class="metric-card">
-<div class="metric-value">{{ report.session_metadata.average_speaking_pace_wpm }}</div>
-<div class="metric-label">Avg Pace</div>
-</div>
-
-<div class="metric-card">
-<div class="metric-value">{{ report.session_metadata.total_filler_words }}</div>
-<div class="metric-label">Total Fillers</div>
-</div>
-
-<div class="metric-card">
-<div class="metric-value">{{ report.session_metadata.confidence_score }}</div>
-<div class="metric-label">Confidence</div>
-</div>
-
-</div>
-
-</section>
-
-
-
-<!-- ================= DETAILED ANSWERS ================= -->
+<!-- ===================================================== -->
+<!-- DETAILED ANSWERS -->
+<!-- ===================================================== -->
 
 <section class="card fade-in">
 
@@ -339,26 +304,35 @@ Confidence: {{ report.verdict.confidence_level }}
 
 {% for ans in report.detailed_answers %}
 
-<div class="answer-card">
+<details class="answer-card">
 
-<h3>Q{{ loop.index }}. {{ ans.question }}</h3>
+<summary>
 
-<div class="score-row">
+<span class="question-title">
+Q{{ loop.index }}. {{ ans.question }}
+</span>
 
-<strong>Score:</strong>
+<span class="score-pill
+{% if ans.score >= 70 %}
+green
+{% elif ans.score >= 40 %}
+yellow
+{% else %}
+red
+{% endif %}
+">
+{{ ans.score }}/100
+</span>
 
-<span class="score-value">{{ ans.score }}/100</span>
+</summary>
 
-<div class="score-bar small">
-<div class="score-bar-fill" style="width:{{ ans.score }}%;"></div>
-</div>
 
-</div>
 
+<div class="answer-content">
 
 <div class="answer-section">
 
-<strong>Your Answer:</strong>
+<strong>Your Answer</strong>
 
 <div class="transcript-box">
 {{ ans.transcript }}
@@ -366,15 +340,6 @@ Confidence: {{ report.verdict.confidence_level }}
 
 </div>
 
-
-{% if ans.feedback %}
-
-<div class="answer-section">
-<strong>Feedback:</strong>
-<p>{{ ans.feedback }}</p>
-</div>
-
-{% endif %}
 
 
 {% if ans.strengths %}
@@ -384,16 +349,15 @@ Confidence: {{ report.verdict.confidence_level }}
 <strong class="strength">Strengths</strong>
 
 <ul>
-
 {% for s in ans.strengths %}
 <li>{{ s }}</li>
 {% endfor %}
-
 </ul>
 
 </div>
 
 {% endif %}
+
 
 
 {% if ans.weaknesses %}
@@ -403,16 +367,15 @@ Confidence: {{ report.verdict.confidence_level }}
 <strong class="weakness">Weaknesses</strong>
 
 <ul>
-
 {% for w in ans.weaknesses %}
 <li>{{ w }}</li>
 {% endfor %}
-
 </ul>
 
 </div>
 
 {% endif %}
+
 
 
 {% if ans.ideal_answer %}
@@ -430,23 +393,26 @@ Confidence: {{ report.verdict.confidence_level }}
 {% endif %}
 
 
+
 <div class="answer-section">
 
 <strong>Voice Metrics</strong>
 
 <div class="answer-voice-chips">
 
-<span class="voice-chip">{{ ans.voice_metrics.speaking_pace_wpm }} WPM</span>
-<span class="voice-chip">{{ ans.voice_metrics.word_count }} words</span>
-<span class="voice-chip">{{ ans.voice_metrics.filler_count }} fillers</span>
-<span class="voice-chip">Clarity {{ ans.voice_metrics.clarity }}</span>
-<span class="voice-chip">Engagement {{ ans.voice_metrics.engagement }}</span>
+<span class="voice-chip">{{ ans.voice_metrics.speaking_pace_wpm | default(0) }} WPM</span>
+<span class="voice-chip">{{ ans.voice_metrics.word_count | default(0) }} words</span>
+<span class="voice-chip">{{ ans.voice_metrics.filler_word_count | default(0) }} fillers</span>
+<span class="voice-chip">Clarity {{ ans.voice_metrics.clarity_score | default(0) }}</span>
+<span class="voice-chip">Engagement {{ ans.voice_metrics.engagement_score | default(0) }}</span>
 
 </div>
 
 </div>
 
 </div>
+
+</details>
 
 {% endfor %}
 
@@ -454,9 +420,14 @@ Confidence: {{ report.verdict.confidence_level }}
 
 
 
+<!-- ===================================================== -->
+<!-- ACTIONS -->
+<!-- ===================================================== -->
+
 <div class="actions">
 
 <a href="/index" class="btn">Back to Dashboard</a>
+
 <a href="/progress" class="btn outline">View Progress</a>
 
 </div>
@@ -464,5 +435,22 @@ Confidence: {{ report.verdict.confidence_level }}
 
 </main>
 
+<script>
+const avatar = document.getElementById("userAvatar");
+const dropdown = document.getElementById("userDropdown");
+
+avatar.addEventListener("click", () => {
+  dropdown.classList.toggle("show");
+});
+
+window.addEventListener("click", function(e) {
+  if (!avatar.contains(e.target) && !dropdown.contains(e.target)) {
+    dropdown.classList.remove("show");
+  }
+});
+</script>
+
 </body>
+
 </html>
+

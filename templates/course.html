@@ -7,13 +7,42 @@
   <title>Course Generator</title>
 </head>
 <body>
-  <header class="page-header">
-    <h1>Course Generator</h1>
-    <div class="top-right">
-      <a href="/index" class="btn small-btn">Back to Dashboard</a>
-      <a href="/logout/" class="logout-link">Logout</a>
+  <nav class="navbar">
+  <div class="nav-container">
+
+    <h2 class="logo">
+      <img src="/static/new_logo.png" alt="Intervista AI logo" class="logo-img">
+      INTERVISTA
+    </h2>
+
+   <div class="nav-links">
+  <a href="/">Home</a>
+  <a href="/#features">Features</a>
+  <a href="/#flow">How it Works</a>
+  <a href="/#contact">Contact</a>
+</div>
+
+      <!-- User menu -->
+      <div class="user-menu">
+        <button class="user-avatar" id="userAvatar">
+          <span class="avatar-circle">{{ username[:1] | upper }}</span>
+        </button>
+
+        <div class="user-dropdown" id="userDropdown">
+          <div class="user-dropdown-header">
+            <div class="user-name">{{ username }}</div>
+          </div>
+
+          <a href="/profile" class="dropdown-item">View Profile</a>
+          <a href="/progress/" class="dropdown-item">Progress</a>
+          <a href="/logout" class="dropdown-item danger">Logout</a>
+        </div>
+      </div>
+
     </div>
-  </header>
+  </div>
+</nav>
+
 
   <main>
 
@@ -232,6 +261,21 @@
     return d.innerHTML;
   }
 })();
+</script>
+
+<script>
+const avatar = document.getElementById("userAvatar");
+const dropdown = document.getElementById("userDropdown");
+
+avatar.addEventListener("click", () => {
+  dropdown.classList.toggle("show");
+});
+
+window.addEventListener("click", function(e) {
+  if (!avatar.contains(e.target) && !dropdown.contains(e.target)) {
+    dropdown.classList.remove("show");
+  }
+});
 </script>
 
 </body>

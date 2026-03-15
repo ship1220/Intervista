@@ -1,4 +1,5 @@
-# prompts.py — Centralized prompt templates
+# prompts.py
+# Centralized prompt templates for the interview system
 
 
 # ============================================================
@@ -6,76 +7,108 @@
 # ============================================================
 
 def interview_questions_prompt(role: str, level: str, count: int = 5) -> str:
+
     return f"""
 You are an experienced technical interviewer.
 
 Generate EXACTLY {count} interview questions for a {level} {role} candidate.
 
-Questions must include:
+Question types:
+1. Resume/experience question
+2. Core technical concept
+3. Behavioral question
+4. Coding problem
+5. Logical reasoning question
 
-• technical concepts
-• behavioral questions
-• one coding question
-• one logical reasoning problem
+Rules:
+- Avoid generic questions.
+- Questions should test real understanding.
+- Coding question should be similar to LeetCode Easy difficulty.
 
-Coding question rules:
-• Easy level (similar to LeetCode Easy)
-• Test problem-solving ability
+Return ONLY valid JSON array.
 
-Return ONLY a JSON array of questions.
-
-Example:
+Example format:
 
 [
-"Question 1?",
-"Question 2?",
-"Question 3?",
-"Question 4?",
-"Question 5?"
+ {{"type":"resume","question":"..."}},
+ {{"type":"technical","question":"..."}},
+ {{"type":"behavioral","question":"..."}},
+ {{"type":"coding","question":"..."}},
+ {{"type":"logic","question":"..."}}
 ]
 """
 
 
-def interview_questions_with_resume_prompt(role: str, level: str, resume_text: str, count: int = 5) -> str:
+# ============================================================
+# QUESTION GENERATION WITH RESUME
+# ============================================================
 
-    truncated = resume_text[:600]
+def interview_questions_with_resume_prompt(
+    role: str,
+    level: str,
+    resume_text: str,
+    count: int = 5
+) -> str:
+
+    resume_preview = resume_text[:600]
 
     return f"""
-You are an experienced technical interviewer.
+You are an experienced interviewer.
 
 Generate EXACTLY {count} interview questions for a {level} {role} candidate.
 
+Use the resume to personalize ONE question.
+
+Resume snippet:
+{resume_preview}
+
 Question distribution:
 
-1. Resume-based question
-2. Core technical concept
-3. Behavioral or experience question
-4. Coding problem
-5. Logical reasoning problem
+1 resume-based question
+1 technical concept
+1 behavioral
+1 coding question
+1 logical reasoning question
 
-Important rules:
+Coding question must be easy algorithmic difficulty.
 
-• Do NOT rely only on the resume.
-• Avoid generic questions like "Tell me about yourself".
-• At least ONE coding problem must be included.
-• Prefer a programming language mentioned in the resume.
-• If none detected, use pseudocode.
-
-Coding difficulty:
-Easy algorithmic problem similar to LeetCode Easy.
-
-Resume:
-{truncated}
-
-Return ONLY JSON array.
+Return ONLY valid JSON array.
 
 [
-"Question 1?",
-"Question 2?",
-"Question 3?",
-"Question 4?",
-"Question 5?"
+ {{"type":"resume","question":"..."}},
+ {{"type":"technical","question":"..."}},
+ {{"type":"behavioral","question":"..."}},
+ {{"type":"coding","question":"..."}},
+ {{"type":"logic","question":"..."}}
 ]
+"""
+
+
+# ============================================================
+# RESUME → SKILL PROFILE
+# ============================================================
+
+def resume_skill_profile_prompt(resume_text: str, role: str, designation: str) -> str:
+
+    resume_preview = resume_text[:800]
+
+    return f"""
+You are analyzing a candidate resume.
+
+Target role: {role}
+Experience level: {designation}
+
+Resume snippet:
+{resume_preview}
+
+Return ONLY JSON:
+
+{{
+ "skills": ["skill1","skill2","skill3"],
+ "skill_gaps": ["topic1","topic2"],
+ "improvement_suggestions": "short paragraph of learning advice",
+ "strength_percentage": number between 0 and 100
+}}
 """
 
 
@@ -86,42 +119,29 @@ Return ONLY JSON array.
 def batch_evaluation_prompt(role: str, answers: list[dict]) -> str:
 
     qa_block = ""
+
     for i, item in enumerate(answers, 1):
-        qa_block += f"\nQ{i}: {item['question']}\nA{i}: {item['answer']}\n"
+
+        q = item["question"][:120]
+        a = item["answer"][:800]
+
+        qa_block += f"\nQ{i}: {q}\nA{i}: {a}\n"
 
     return f"""
-You are an expert interview evaluator for the role of {role}.
+You are evaluating interview answers for the role of {role}.
 
-Evaluate the answers below.
+Answers are speech transcriptions and may contain grammar mistakes.
 
-The answers come from speech-to-text transcription and may contain:
-• grammar mistakes
-• punctuation issues
-• repeated words
+Evaluate meaning, not grammar.
 
-Evaluate the **intended meaning**, not grammar.
-
-For EACH answer return:
-
-• feedback
-• improved_answer
-
-Also return:
-
-• 3 improvement tips
-• 3 learning resources
-
-Interview responses:
-{qa_block}
-
-Return ONLY JSON.
+Return JSON:
 
 {{
  "feedback_per_question":[
   {{
    "question":"question",
    "candidate_answer":"answer",
-   "feedback":"feedback",
+   "feedback":"constructive explanation",
    "improved_answer":"better answer"
   }}
  ],
@@ -133,10 +153,13 @@ Return ONLY JSON.
  "learning_resources":[
   {{
    "topic":"topic",
-   "resource":"resource"
+   "resource":"learning suggestion"
   }}
  ]
 }}
+
+Interview responses:
+{qa_block}
 """
 
 
@@ -147,83 +170,86 @@ Return ONLY JSON.
 def interview_evaluation_prompt(role: str, questions_answers: list[dict]) -> str:
 
     qa_block = ""
+
     for i, qa in enumerate(questions_answers, 1):
+
         q = qa["question"][:120]
-        a = qa["answer"][:600]
+        a = qa["answer"][:800]
+
         qa_block += f"\nQ{i}: {q}\nA{i}: {a}\n"
 
     return f"""
-You are a technical interviewer evaluating answers for a {role} interview.
+You are an expert technical interviewer evaluating answers for a {role} interview.
 
-IMPORTANT:
-Answers come from speech transcription and may contain grammar errors.
-Evaluate the intended meaning, not exact wording.
+Important:
+Answers come from speech transcription. Ignore grammar errors.
+
+Evaluate every answer.
 
 Scoring guide:
-70-100 → concept mostly correct
-50-69 → partial understanding
-35-49 → weak but attempted
-0-34 → incorrect
+90-100 → Excellent
+70-89 → Good with minor gaps
+50-69 → Partial understanding
+30-49 → Weak but attempted
+0-29 → Incorrect or empty
 
-For EACH answer return:
-score
-feedback (2 sentences)
-strengths (2 points)
-weaknesses (2 points)
-ideal_answer (short strong answer)
-
-Also return weak_topics (concepts to study).
-
-Interview:
-{qa_block}
-
-Return ONLY JSON:
+Return ONLY JSON.
 
 {{
  "answers":[
   {{
    "score":70,
-   "feedback":"short explanation",
-   "strengths":["point","point"],
-   "weaknesses":["issue","issue"],
-   "ideal_answer":"example answer"
+   "strengths":["specific strength"],
+   "weaknesses":["specific improvement"],
+   "ideal_answer":"short model answer about how the user should've answered(max 3 sentences)",
+   "weak_topics":["topic to study"]
   }}
  ],
- "weak_topics":["topic1","topic2"],
- "overall_feedback":"2 sentence summary"
+ "weak_topics":["overall topic1","overall topic2"]
 }}
+
+Interview responses:
+{qa_block}
 """
 
 
 # ============================================================
-# COURSE GENERATION
+# COURSE OUTLINE
 # ============================================================
 
 def course_outline_prompt(role: str, level: str) -> str:
 
     return f"""
-Create a structured course outline for a {level} {role}.
+You are an expert course designer.
 
-The course must prepare the student with all skills needed for the role.
-
-Include technologies, frameworks, and concepts employers expect.
+Create a learning roadmap for a {level} {role}.
 
 Return ONLY JSON.
 
 {{
- "course_title":"Course title",
- "course_description":"Short description",
+ "course_title":"title",
+ "course_description":"short description",
  "modules":[
-  {{"title":"Module title","description":"Short description"}}
+  {{
+   "title":"module title",
+   "description":"module description"
+  }}
  ]
 }}
 """
 
 
+# ============================================================
+# COURSE MODULE DETAIL
+# ============================================================
+
 def course_module_detail_prompt(role: str, level: str, module_title: str) -> str:
 
     return f"""
-Generate educational content for the module "{module_title}" in a {level} {role} course.
+Generate detailed educational content.
+
+Course: {level} {role}
+Module: {module_title}
 
 Return ONLY JSON.
 
@@ -233,23 +259,23 @@ Return ONLY JSON.
  "concepts":["concept1","concept2"],
  "lessons":[
   {{
-   "title":"Lesson title",
-   "theory":"theory explanation",
-   "example":"example"
+   "title":"lesson title",
+   "theory":"concept explanation",
+   "example":"practical example"
   }}
  ],
  "exercises":["exercise1","exercise2"],
  "quiz":[
   {{
-   "question":"question",
+   "question":"quiz question",
    "options":["A","B","C","D"],
-   "answer":"correct"
+   "answer":"correct option"
   }}
  ],
  "project":{{
-  "title":"project",
-  "description":"description",
-  "skills_practiced":["skill1"]
+  "title":"project title",
+  "description":"project description",
+  "skills_practiced":["skill1","skill2"]
  }},
  "resources":[
   {{
@@ -272,27 +298,34 @@ def performance_summary_prompt(report_data: dict) -> str:
     content = report_data.get("content_analysis", {})
     verdict = report_data.get("verdict", {})
 
+    role = profile.get("role")
+    score = report_data.get("overall_score")
+
+    clarity = voice.get("clarity_score")
+    engagement = voice.get("engagement_score")
+
+    relevance = content.get("relevance_score")
+    depth = content.get("depth_score")
+
+    recommendation = verdict.get("recommendation")
+
     return f"""
 Write a concise 4 sentence interview performance summary.
 
-Role: {profile.get('role')}
-Level: {profile.get('level')}
-Score: {report_data.get('overall_score')}/100
-Verdict: {verdict.get('recommendation')}
+Role: {role}
+Overall Score: {score}
+Technical Relevance: {relevance}
+Depth of Explanation: {depth}
+Clarity Score: {clarity}
+Engagement Score: {engagement}
+Verdict: {recommendation}
 
-Voice metrics:
-Pace {voice.get('speaking_pace_wpm')} WPM,
-Fillers {voice.get('total_filler_words')}
+The summary must include:
+1. strengths
+2. technical improvements
+3. communication improvements
+4. one actionable recommendation
 
-Content metrics:
-Average score {content.get('average_score')}
-
-Discuss:
-
-• overall performance
-• communication
-• technical understanding
-• improvement areas
-
-Return ONLY the paragraph.
+Write exactly 4 sentences.
+Avoid generic statements.
 """
