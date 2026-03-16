@@ -103,19 +103,23 @@ def extract_json(text: str):
 
     cleaned = re.sub(r',(\s*[}\]])', r'\1', cleaned)
 
-    return json.loads(cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        print("[JSON ERROR]", e)
+        print("[BROKEN JSON]", cleaned)
+        raise
 
 
 # ============================================================
 # GROQ CALL
 # ============================================================
 
-async def _call_groq(prompt: str, json_mode=False, api_key=None) -> str:
+client = Groq(api_key=GROQ_API_KEY)
+
+async def _call_groq(prompt: str, json_mode: bool = False) -> str:
 
     def run():
-
-        client = Groq(api_key=api_key or GROQ_API_KEY)
-
         messages = []
 
         if json_mode:
@@ -139,9 +143,7 @@ async def _call_groq(prompt: str, json_mode=False, api_key=None) -> str:
         return response.choices[0].message.content.strip()
 
     loop = asyncio.get_running_loop()
-
     return await loop.run_in_executor(None, run)
-
 
 # ============================================================
 # GENERATE CONTENT
@@ -164,7 +166,7 @@ async def generate_content(
             return cached
 
     try:
-        result = await _call_groq(prompt, json_mode=json_mode, api_key=api_key)
+        result = await _call_groq(prompt, json_mode=json_mode)
 
     except Exception as e:
         print("[groq] error:", e)
@@ -286,33 +288,42 @@ def compute_confidence_score(speech_analyses: list) -> int:
 # CONTENT EVALUATION
 # ============================================================
 
+# ============================================================
+# CONTENT EVALUATION
+# ============================================================
+
 async def evaluate_content(role: str, level: str, questions_answers: list, api_key=None):
 
     results = []
-
     weak_topics = []
 
     for qa in questions_answers:
 
         question = qa.get("question", "")[:120]
+        answer = qa.get("answer", "").strip()[:1500]
 
-        answer = qa.get("answer", "")[:800]
+        skipped = not answer or answer.lower() in ["(skipped)", "(no response)"]
+
+        if skipped:
+            answer = "(skipped)"
 
         prompt = f"""
 You are evaluating an interview answer for a {level} {role} candidate.
 
+IMPORTANT:
+- Answers come from speech transcription. Ignore grammar errors.
 Scoring rules:
 
-10-20 → Completely incorrect OR empty answer OR skipped answer  
-30–40 → Attempted but mostly incorrect  
-60-70 → Conceptually correct but poorly structured or lacking clarity  
-80–90 → Correct, clear, and well explained answer  
-90–100 → Excellent answer with strong explanation and examples
+0 → Question skipped or empty answer
+10-20 → Completely incorrect answer
+50-70 → Conceptually correct but poorly structured
+80–90 → Correct, clear explanation
+90–100 → Excellent with strong explanation
 
-Important rules:
-- NEVER give a score below 10.
-- If the answer is conceptually correct but poorly structured, give around 70.
-- If the answer clearly explains the concept, give 80–90.
+If the candidate answer is "(skipped)":
+- Score MUST be 0
+- Mention that the candidate skipped the question
+- ALWAYS generate a full ideal_answer teaching the correct concept
 
 Question:
 {question}
@@ -331,69 +342,53 @@ Return JSON:
 }}
 """
 
-        raw = await generate_content(prompt, use_cache=False, api_key=api_key)
+        raw = await generate_content(prompt, use_cache=False, json_mode=True)
 
         try:
-
             parsed = extract_json(raw)
 
             topics = parsed.get("weak_topics", [])
-
             weak_topics.extend(topics)
 
+            score = parsed.get("score", 0)
+
+            try:
+                score = float(score)
+            except:
+                score = 0
+
             results.append({
-
-                "score": parsed.get("score", 50),
-
+                "score": score,
                 "strengths": parsed.get("strengths", ["Answer attempted."]),
-
                 "weaknesses": parsed.get("weaknesses", ["Needs improvement."]),
-
-                "ideal_answer": parsed.get("ideal_answer", ""),
-
+                "ideal_answer": parsed.get("ideal_answer", "Ideal answer unavailable."),
                 "weak_topics": topics
-
             })
 
         except Exception:
 
             results.append({
-
-                "score": 50,
-
-                "strengths": ["Answer attempted."],
-
-                "weaknesses": ["Evaluation unavailable."],
-
-                "ideal_answer": "",
-
+                "score": 0,
+                "strengths": [],
+                "weaknesses": ["Evaluation unavailable due to parsing error."],
+                "ideal_answer": "Ideal answer could not be generated.",
                 "weak_topics": []
-
             })
 
     scores = [r["score"] for r in results]
 
-    avg = sum(scores) / len(scores) if scores else 50
+    avg = sum(scores) / len(scores) if scores else 0
 
     return {
-
         "answers": results,
-
         "weak_topics": list(set(weak_topics)),
-
         "overall_feedback": "",
-
         "aggregate": {
-
             "technical_score": round(avg),
-
             "communication_score": round(avg * 0.9),
-
             "overall_score": round(avg)
-
         }
     }
-
 
 # ============================================================
 # PERFORMANCE SUMMARY
@@ -405,6 +400,21 @@ async def generate_performance_summary(report_data: dict, api_key=None):
 
     score = report_data.get("overall_score")
 
+    answers = report_data.get("detailed_answers", [])
+
+    attempted = [
+        a for a in answers
+        if a.get("transcript") not in ["", "(skipped)", "(no response)"]
+    ]
+
+    if len(attempted) == 0:
+        return (
+            "The candidate did not provide answers to the interview questions. "
+            "As a result, the system could not evaluate technical knowledge or communication ability. "
+            "Overall performance is considered very poor due to lack of responses. "
+            "The candidate should attempt answering questions to receive meaningful feedback."
+        )
+
     prompt = f"""
 Write a concise 4 sentence interview performance summary.
 
@@ -415,19 +425,26 @@ Explain strengths, weaknesses, communication quality,
 and one recommendation for improvement.
 """
 
-    raw = await generate_content(prompt, use_cache=False, api_key=api_key)
+    raw = await generate_content(prompt, use_cache=False, json_mode=False)
 
     return raw.strip() if raw else "Summary unavailable."
 
+
+    
 
 # ============================================================
 # OVERALL SCORE
 # ============================================================
 
-def compute_overall_score(content_avg, clarity_avg, engagement_avg):
+def compute_overall_score(content_avg, clarity_avg, engagement_avg, answers=None):
+
+    # If candidate answered nothing
+    attempted = [a for a in answers if a["answer"] not in ["(skipped)", "(no response)", ""]]
+
+    if len(attempted) == 0:
+        return 0
 
     score = 0.5 * content_avg + 0.3 * clarity_avg + 0.2 * engagement_avg
-
     return round(max(0, min(100, score)), 1)
 
 
@@ -509,7 +526,7 @@ async def evaluate_answers(role: str, questions_answers: list) -> dict:
 
     prompt = batch_evaluation_prompt(role, questions_answers)
 
-    raw = await generate_content(prompt, use_cache=False)
+    raw = await generate_content(prompt, use_cache=False, json_mode=True)
 
     try:
         evaluation = extract_json(raw)

@@ -20,7 +20,7 @@
     </h2>
 
    <div class="nav-links">
-  <a href="/">Home</a>
+  <a href="/index">Home</a>
   <a href="/#features">Features</a>
   <a href="/#flow">How it Works</a>
   <a href="/#contact">Contact</a>
@@ -218,7 +218,7 @@ Confidence: {{ report.verdict.confidence_level }}
 </div>
 
 <div class="metric-card">
-<div class="metric-value">{{ va.filler_word_count | default(0) }}</div>
+<div class="metric-value">{{ va.total_filler_words | default(0) }}</div>
 <div class="metric-label">Filler Words</div>
 </div>
 
@@ -426,9 +426,20 @@ red
 
 <div class="actions">
 
-<a href="/index" class="btn">Back to Dashboard</a>
+<form action="/start_interview/" method="post">
+<input type="hidden" name="role" value="{{ report.candidate_profile.role }}">
+<input type="hidden" name="level" value="{{ report.candidate_profile.level }}">
 
-<a href="/progress" class="btn outline">View Progress</a>
+<button type="submit" class="btn">
+Give Interview Again
+</button>
+</form>
+
+<a href="/index" class="btn outline">Back to Dashboard</a>
+
+<a href="/progress" class="btn outline">
+View Progress
+</a>
 
 </div>
 

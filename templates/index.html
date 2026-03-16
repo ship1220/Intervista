@@ -52,16 +52,20 @@
 
       <form id="start-form">
         <label for="role">Job Role</label>
-        <input type="text" id="role" name="role" placeholder="e.g. Data Analyst" required>
+        <input type="text" id="role" name="role" value="{{ saved_role }}" placeholder="e.g. Data Analyst" required>
 
-        <label for="level">Designation / Level</label>
-        <select id="level" name="level" required>
-          <option value="">-- Select Level --</option>
-          <option value="intern">Intern</option>
-          <option value="junior">Junior</option>
-          <option value="mid">Mid-Level</option>
-          <option value="senior">Senior</option>
-        </select>
+       <select id="level" name="level" required>
+<option value="">-- Select Level --</option>
+
+<option value="intern" {% if saved_level == "intern" %}selected{% endif %}>Intern</option>
+
+<option value="junior" {% if saved_level == "junior" %}selected{% endif %}>Junior</option>
+
+<option value="mid" {% if saved_level == "mid" %}selected{% endif %}>Mid-Level</option>
+
+<option value="senior" {% if saved_level == "senior" %}selected{% endif %}>Senior</option>
+
+</select>
 
         <label for="resume">Resume (optional)</label>
         <input type="file" id="resume" accept=".pdf,.docx" />
@@ -82,17 +86,6 @@
           <input type="hidden" id="hidden-role" name="role">
           <input type="hidden" id="hidden-level" name="level">
 
-          <label for="grok-api-key" style="font-size:0.9rem;">Grok API Key</label>
-          <input
-            type="password"
-            id="grok-api-key"
-            name="grok_api_key"
-            placeholder="Paste your Grok API key"
-            required
-          />
-          <small style="color: var(--text-muted); font-size: 0.8rem;">
-            Used only for this interview session and never stored in the database.
-          </small>
 
           <button type="submit" class="btn" style="width:220px;" id="btn-interview">
             Take Voice Interview

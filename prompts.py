@@ -179,7 +179,7 @@ def interview_evaluation_prompt(role: str, questions_answers: list[dict]) -> str
         qa_block += f"\nQ{i}: {q}\nA{i}: {a}\n"
 
     return f"""
-You are an expert technical interviewer evaluating answers for a {role} interview.
+You are a technical interviewer evaluating answers for a {role} interview.
 
 Important:
 Answers come from speech transcription. Ignore grammar errors.
@@ -201,7 +201,7 @@ Return ONLY JSON.
    "score":70,
    "strengths":["specific strength"],
    "weaknesses":["specific improvement"],
-   "ideal_answer":"short model answer about how the user should've answered(max 3 sentences)",
+   "ideal_answer":"short model answer about how the user should've answered(maximum 3 sentences)",
    "weak_topics":["topic to study"]
   }}
  ],
@@ -297,6 +297,7 @@ def performance_summary_prompt(report_data: dict) -> str:
     voice = report_data.get("voice_analysis", {})
     content = report_data.get("content_analysis", {})
     verdict = report_data.get("verdict", {})
+    answers = report_data.get("detailed_answers", [])
 
     role = profile.get("role")
     score = report_data.get("overall_score")
@@ -309,8 +310,27 @@ def performance_summary_prompt(report_data: dict) -> str:
 
     recommendation = verdict.get("recommendation")
 
+    # Summarize answers for the prompt
+    answer_summary = []
+
+    for i, ans in enumerate(answers, 1):
+
+        q = ans.get("question", "")[:120]
+        a_score = ans.get("score", 0)
+
+        strengths = ", ".join(ans.get("strengths", []))
+        weaknesses = ", ".join(ans.get("weaknesses", []))
+
+        answer_summary.append(
+            f"Q{i} Score: {a_score}\n"
+            f"Strengths: {strengths}\n"
+            f"Weaknesses: {weaknesses}"
+        )
+
+    answer_block = "\n\n".join(answer_summary)
+
     return f"""
-Write a concise 4 sentence interview performance summary.
+You are summarizing an AI interview evaluation.
 
 Role: {role}
 Overall Score: {score}
@@ -320,12 +340,17 @@ Clarity Score: {clarity}
 Engagement Score: {engagement}
 Verdict: {recommendation}
 
-The summary must include:
-1. strengths
-2. technical improvements
-3. communication improvements
-4. one actionable recommendation
+Question Evaluations:
+{answer_block}
 
-Write exactly 4 sentences.
+Give a concise 4 sentence performance summary.
+
+The summary must include:
+1. Candidate's main strengths
+2. Key technical weaknesses
+3. Communication quality
+4. One actionable recommendation for improvement
+
+Be specific and refer to the evaluation results.
 Avoid generic statements.
 """

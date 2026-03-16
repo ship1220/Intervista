@@ -109,10 +109,6 @@ resume_store: dict[str, str] = {}
 # In-memory report store (latest report per user)
 report_store: dict[str, dict] = {}
 
-# In-memory store for short-lived Groq/Grok API keys, keyed by username.
-# This is NOT persisted to the database and is cleared on logout and
-# after an interview completes.
-grok_session_keys: dict[str, str] = {}
 
 # ===========================================================================
 # DATABASE DEPENDENCY
@@ -306,13 +302,6 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
 
 @app.get("/logout")
 def logout(request: Request, db: Session = Depends(get_db)):
-    """
-    Log the user out and clear any short-lived secrets such as Grok API keys.
-    """
-    user = get_current_user(request, db)
-    if user:
-        grok_session_keys.pop(user.username, None)
-
     resp = RedirectResponse("/")
     resp.delete_cookie("user")
     return resp
@@ -342,10 +331,25 @@ def update_resume(request: Request, file: UploadFile, db: Session = Depends(get_
 
 @app.get("/index", response_class=HTMLResponse)
 def index(request: Request, db: Session = Depends(get_db)):
+
     user = get_current_user(request, db)
     if not user:
         return RedirectResponse("/login")
-    return templates.TemplateResponse("index.html", {"request": request, "username": user.username})
+
+    profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
+
+    role = profile.role_applied_for if profile else ""
+    level = profile.current_designation if profile else ""
+
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "username": user.username,
+            "saved_role": role,
+            "saved_level": level,
+        },
+    )
 
 @app.get("/progress", response_class=HTMLResponse)
 def progress_page(request: Request, db: Session = Depends(get_db)):
@@ -508,34 +512,21 @@ def start_interview_page(
     request: Request,
     role: str = Form(...),
     level: str = Form(...),
-    grok_api_key: str = Form(...),
     db: Session = Depends(get_db),
 ):
     user = get_current_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
 
-    grok_api_key = (grok_api_key or "").strip()
-    if not grok_api_key:
-        # Prevent starting interview without an API key
-        return templates.TemplateResponse(
-            "index.html",
-            {
-                "request": request,
-                "username": user.username,
-                "error": "Grok API key is required to start the interview.",
-            },
-        )
-
-    # Store short-lived API key in memory, not in the database.
-    grok_session_keys[user.username] = grok_api_key
-    return templates.TemplateResponse("interview.html", {
-        "request": request,
-        "username": user.username,
-        "role": role,
-        "level": level,
-    })
-
+    return templates.TemplateResponse(
+        "interview.html",
+        {
+            "request": request,
+            "username": user.username,
+            "role": role,
+            "level": level,
+        },
+    )
 # ===========================================================================
 # INTERVIEW API — Generate questions (called by JS after page loads)
 # ===========================================================================
@@ -552,10 +543,6 @@ async def api_interview_questions(
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
 
-    api_key = grok_session_keys.get(user.username)
-    if not api_key:
-        raise HTTPException(status_code=400, detail="Missing Grok API key for this session.")
-
     resume_text = resume_store.get(user.username, "")
 
     if resume_text:
@@ -563,7 +550,7 @@ async def api_interview_questions(
     else:
         prompt = interview_questions_prompt(role, level, count)
 
-    raw = await generate_content(prompt, use_cache=False, json_mode=True, api_key=api_key)
+    raw = await generate_content(prompt, use_cache=False, json_mode=True)
 
     raw = raw.strip()
 
@@ -667,9 +654,6 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
 
-    api_key = grok_session_keys.get(user.username)
-    if not api_key:
-        raise HTTPException(status_code=400, detail="Missing Grok API key for this session.")
 
     body = await request.json()
     
@@ -718,7 +702,7 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         confidence = compute_confidence_score(speech_analyses)
 
         # -- FEATURE 3: Content Analysis (LLM) ------------------------
-        content_result = await evaluate_content(role, level, questions_answers, api_key=api_key)
+        content_result = await evaluate_content(role, level, questions_answers)
         print(f"[evaluate] content_result keys: {list(content_result.keys())}")
         content_answers = content_result.get("answers", [])
         print(f"[evaluate] content_answers count: {len(content_answers)}")
@@ -728,7 +712,7 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         content_avg = sum(content_scores) / max(len(content_scores), 1)
 
         # -- FEATURE 6: Overall Score & Verdict ------------------------
-        overall = compute_overall_score(content_avg, avg_clarity, avg_engagement)
+        overall = compute_overall_score(content_avg, avg_clarity, avg_engagement,questions_answers)
         verdict = compute_recruiter_verdict(overall, role)
 
         # -- FEATURE 4 (cont.): Session Metadata -----------------------
@@ -782,14 +766,13 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
                 "weaknesses": weaknesses,
                 "ideal_answer": ca.get("ideal_answer", "No ideal answer generated."),
                 "weak_topics": ca.get("weak_topics", []),
-                "voice_metrics": {
-                    "speaking_pace_wpm": sa.get("speaking_pace_wpm", 0),
-                    "filler_count": sa.get("filler_word_count", 0),
-                    "filler_words_found": sa.get("filler_words_found", []),
-                    "clarity": sa.get("clarity_score", 0),
-                    "engagement": sa.get("engagement_score", 0),
-                    "word_count": sa.get("word_count", 0),
-                },
+               "voice_metrics": {
+    "speaking_pace_wpm": sa.get("speaking_pace_wpm", 0),
+    "filler_word_count": sa.get("filler_word_count", 0),
+    "clarity_score": sa.get("clarity_score", 0),
+    "engagement_score": sa.get("engagement_score", 0),
+    "word_count": sa.get("word_count", 0),
+}
             })
 
         # -- FEATURE 8: Assemble Report --------------------------------
@@ -825,7 +808,7 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         if overall_feedback and overall_feedback.strip():
             report["performance_summary"] = overall_feedback.strip()
         else:
-            summary = await generate_performance_summary(report, api_key=api_key)
+            summary = await generate_performance_summary(report)
             report["performance_summary"] = summary
 
         # Expose weak topics at the top level for report.html
@@ -1009,9 +992,6 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
 
         db.commit()
 
-        # Clear Grok API key after interview is fully processed
-        grok_session_keys.pop(user.username, None)
-
         return report
     
     else:
@@ -1028,7 +1008,7 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
 
         # Generate batch evaluation
         prompt = batch_evaluation_prompt(role, answers)
-        raw = await generate_content(prompt, use_cache=False, json_mode=True, api_key=api_key)
+        raw = await generate_content(prompt, use_cache=False, json_mode=True)
 
         print(f"[evaluate] raw AI response length: {len(raw)}")
         print(f"[evaluate] raw AI response (first 500 chars): {raw[:500]}")

@@ -9,15 +9,44 @@
 
 <body>
 
-<header class="page-header">
-<h1>AI Voice Interview</h1>
+     <nav class="navbar">
+  <div class="nav-container">
 
-<div class="top-right">
-Logged in as <b>{{ username }}</b>
-<a href="/index" class="btn small-btn">Back to Dashboard</a>
-<a href="/logout/" class="logout-link">Logout</a>
+    <h2 class="logo">
+      <img src="/static/new_logo.png" alt="Intervista AI logo" class="logo-img">
+      INTERVISTA
+    </h2>
+
+   <div class="nav-links">
+  <a href="/index">Home</a>
+  <a href="/#features">Features</a>
+  <a href="/#flow">How it Works</a>
+  <a href="/#contact">Contact</a>
 </div>
 
+      <!-- User menu -->
+      <div class="user-menu">
+        <button class="user-avatar" id="userAvatar">
+          <span class="avatar-circle">{{ username[:1] | upper }}</span>
+        </button>
+
+        <div class="user-dropdown" id="userDropdown">
+          <div class="user-dropdown-header">
+            <div class="user-name">{{ username }}</div>
+          </div>
+
+          <a href="/profile" class="dropdown-item">View Profile</a>
+          <a href="/progress/" class="dropdown-item">Progress</a>
+          <a href="/logout" class="dropdown-item danger">Logout</a>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</nav>
+
+<header class="page-header">
+<h1>AI Voice Interview</h1>
 </header>
 
 
@@ -57,16 +86,12 @@ Logged in as <b>{{ username }}</b>
 
 
 <div id="voice-status" class="voice-status">
-
 <div class="voice-ring" id="voice-ring"></div>
-
 <span id="voice-status-text">Waiting...</span>
-
 </div>
 
 
 <div id="transcript-area" style="margin-top:16px;">
-
 <label style="font-size:0.9rem;">Your answer:</label>
 
 <textarea
@@ -124,7 +149,7 @@ let recognition=null;
 let isListening=false;
 let answerSubmitted=false;
 let typingTimer=null;
-let isCodingMode=false;
+let manualSubmitMode=false;
 
 
 /* BUTTONS */
@@ -164,7 +189,7 @@ if(answerSubmitted) return;
 
 answerSubmitted=true;
 
-stopCodingTimer();
+stopListening();
 
 const answer=document.getElementById("live-transcript").value.trim();
 
@@ -188,7 +213,10 @@ function speak(text){
 
 return new Promise(resolve=>{
 
-if(!('speechSynthesis' in window)){resolve();return;}
+if(!('speechSynthesis' in window)){
+resolve();
+return;
+}
 
 window.speechSynthesis.cancel();
 
@@ -208,81 +236,11 @@ window.speechSynthesis.speak(utter);
 
 
 
-/* CODING DETECTOR */
-
-function isCodingQuestion(question){
-
-const keywords=[
-"write a function",
-"write code",
-"algorithm",
-"pseudo",
-"write a program",
-"write code",
-"implement",
-"code a function",
-"solve this problem using code",
-"leetcode style",
-"return the output",
-"implement an algorithm",
-"code",
-"program"
-];
-
-question=question.toLowerCase();
-
-return keywords.some(k=>question.includes(k));
-
-}
-
-
-
-/* CODING TIMER */
-
-let timerInterval=null;
-
-function startCodingTimer(seconds){
-
-const box=document.getElementById("coding-timer");
-const value=document.getElementById("timer-value");
-
-box.style.display="block";
-
-let remaining=seconds;
-
-value.textContent=remaining;
-
-timerInterval=setInterval(()=>{
-
-remaining--;
-value.textContent=remaining;
-
-if(remaining<=0){
-clearInterval(timerInterval);
-}
-
-},1000);
-
-}
-
-
-function stopCodingTimer(){
-
-if(timerInterval) clearInterval(timerInterval);
-
-document.getElementById("coding-timer").style.display="none";
-
-}
-
-
-
 /* SPEECH RECOGNITION */
 
 const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
 
 function startListening(){
-
-if(isCodingMode) return;
 
 if(!SpeechRecognition) return;
 
@@ -293,6 +251,7 @@ recognition.interimResults=true;
 recognition.lang="en-US";
 
 let finalTranscript="";
+window.currentTranscript="";
 let silenceTimer=null;
 
 const SILENCE_TIMEOUT=8000;
@@ -316,7 +275,8 @@ let interim="";
 for(let i=event.resultIndex;i<event.results.length;i++){
 
 if(event.results[i].isFinal){
-finalTranscript+=event.results[i][0].transcript+" ";
+finalTranscript += event.results[i][0].transcript + " ";
+window.currentTranscript = finalTranscript;
 }else{
 interim+=event.results[i][0].transcript;
 }
@@ -325,10 +285,14 @@ interim+=event.results[i][0].transcript;
 
 transcript.value=finalTranscript+interim;
 
-if(!isCodingMode){
+/* Auto-submit only for first 3 questions */
+
+if(!manualSubmitMode){
+
 silenceTimer=setTimeout(()=>{
 finishAnswer();
 },SILENCE_TIMEOUT);
+
 }
 
 };
@@ -359,7 +323,7 @@ const transcriptBox=document.getElementById("live-transcript");
 
 transcriptBox.addEventListener("input",()=>{
 
-if(isCodingMode) return;
+if(manualSubmitMode) return;
 
 clearTimeout(typingTimer);
 
@@ -387,15 +351,13 @@ showQuestion();
 
 
 function showQuestion(){
-if(isCodingMode){
-stopListening();
-}
-answerSubmitted=false;
 
 if(currentIdx >= questions.length){
 evaluateAll();
 return;
 }
+
+answerSubmitted=false;
 
 const qObj = questions[currentIdx];
 const q = typeof qObj === "string" ? qObj : qObj.question;
@@ -409,26 +371,24 @@ document.getElementById("live-transcript").value="";
 
 clearTimeout(typingTimer);
 
-isCodingMode = isCodingQuestion(q);
+/* LAST TWO QUESTIONS REQUIRE MANUAL SUBMIT */
+
+manualSubmitMode = currentIdx >= questions.length - 2;
 
 document.getElementById("btn-submit-code").style.display =
-isCodingMode ? "inline-block" : "none";
+manualSubmitMode ? "inline-block" : "none";
+
+/* Disable typing while AI speaks */
+
+transcriptBox.disabled=true;
 
 speak(q).then(()=>{
 
-if(isCodingMode){
+transcriptBox.disabled=false;
 
-// Coding question
-// Do NOT start listening
-// Do NOT start timer
-// User will manually submit
+/* Start listening only after AI finishes speaking */
 
-}else{
-
-// Non-coding question
 startListening();
-
-}
 
 });
 
