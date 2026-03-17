@@ -14,17 +14,48 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 </head>
+<nav class="navbar">
+  <div class="nav-container">
+
+    <h2 class="logo">
+      <img src="/static/new_logo.png" alt="Intervista AI logo" class="logo-img">
+      INTERVISTA
+    </h2>
+
+   <div class="nav-links">
+  <a href="/">Home</a>
+  <a href="/#features">Features</a>
+  <a href="/#flow">How it Works</a>
+  <a href="/#contact">Contact</a>
+</div>
+
+      <!-- User menu -->
+      <div class="user-menu">
+        <button class="user-avatar" id="userAvatar">
+          <span class="avatar-circle">{{ username[:1] | upper }}</span>
+        </button>
+
+        <div class="user-dropdown" id="userDropdown">
+          <div class="user-dropdown-header">
+            <div class="user-name">{{ username }}</div>
+          </div>
+
+          <a href="/home/" class="dropdown-item">Dashboard</a>
+          <a href="/progress/" class="dropdown-item">Progress</a>
+          <a href="/logout" class="dropdown-item danger">Logout</a>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</nav>
+
 
 <body>
 
 <header class="page-header">
 
 <h1>Your Profile</h1>
-
-<div class="top-right">
-<a href="/index" class="btn small-btn">Dashboard</a>
-<a href="/logout" class="logout-link">Logout</a>
-</div>
 
 </header>
 
@@ -344,13 +375,18 @@ return row
 
 function renderBreakdown(){
 
-const tech=skillProfile.technical_skills||{}
-const inter=skillProfile.interview_skills||{}
-const comm=skillProfile.communication_skills||{}
+const tech = skillProfile.technical_skills || {};
+const inter = skillProfile.interview_skills || {};
+const comm = skillProfile.communication_skills || {};
 
-const t=document.getElementById("technical-skills")
-const i=document.getElementById("interview-skills")
-const c=document.getElementById("communication-skills")
+const t = document.getElementById("technical-skills");
+const i = document.getElementById("interview-skills");
+const c = document.getElementById("communication-skills");
+
+// ✅ clear before appending
+t.innerHTML = "";
+i.innerHTML = "";
+c.innerHTML = "";
 
 t.appendChild(progressBar("DSA",tech.dsa))
 t.appendChild(progressBar("DBMS",tech.dbms))
@@ -369,9 +405,7 @@ c.appendChild(progressBar("Confidence",comm.confidence))
 c.appendChild(progressBar("Engagement",comm.engagement))
 c.appendChild(progressBar("Speaking Pace",comm.speaking_pace))
 c.appendChild(progressBar("Filler Control",comm.filler_control))
-
 }
-
 
 /* ============================= */
 /* RADAR CHART */
@@ -447,63 +481,67 @@ legend:{display:false}
 /* ============================= */
 /* PERFORMANCE TIMELINE */
 /* ============================= */
-
 function renderTimeline(role){
 
-const data=timelineByRole[role]
+const data = timelineByRole[role] || [];
 
-if(!data) return
-
-const ctx=document.getElementById("performanceChart")
-
-if(window._timelineChart) window._timelineChart.destroy()
-
-window._timelineChart = new Chart(ctx,{
-
-type:"line",
-
-data:{
-labels:data.map(d=>d.label),
-
-datasets:[{
-label:role+" Performance",
-data:data.map(d=>d.score),
-borderColor:"rgba(54,162,235,1)",
-backgroundColor:"rgba(54,162,235,0.2)",
-tension:0.2,
-fill:true
-}]
-},
-
-options:{
-scales:{
-y:{min:0,max:100}
-}
+if(data.length === 0){
+    console.log("No data for role:", role);
+    return;
 }
 
-})
+const labels = data.map(d => d.date);
+const scores = data.map(d => d.score);
 
+const ctx = document.getElementById("performanceChart");
+
+if(window._timelineChart) window._timelineChart.destroy();
+
+window._timelineChart = new Chart(ctx, {
+    type: "line",
+    data: {
+        labels: labels,
+        datasets: [{
+            label: role + " Performance",
+            data: scores,
+            tension: 0.3,
+            fill: true
+        }]
+    },
+    options: {
+        scales: {
+            y: { min: 0, max: 100 }
+        }
+    }
+});
 }
-
 
 function initTimeline(){
 
-const selector=document.getElementById("roleSelector")
+const selector = document.getElementById("roleSelector");
+const roles = Object.keys(timelineByRole);
 
-Object.keys(timelineByRole).forEach(role=>{
+if(roles.length === 0){
+    console.log("No timeline data");
+    return;
+}
 
-const opt=document.createElement("option")
-opt.value=role
-opt.textContent=role
+roles.forEach(role => {
+    const opt = document.createElement("option");
+    opt.value = role;
+    opt.textContent = role;
+    selector.appendChild(opt);
+});
 
-selector.appendChild(opt)
+// ✅ auto select first role
+selector.value = roles[0];
 
-})
+// ✅ render first graph
+renderTimeline(roles[0]);
 
-selector.addEventListener("change",()=>renderTimeline(selector.value))
-
-if(selector.value) renderTimeline(selector.value)
-
+selector.addEventListener("change", () => {
+    renderTimeline(selector.value);
+});
 }
 
 
@@ -513,14 +551,16 @@ if(selector.value) renderTimeline(selector.value)
 
 function renderOverall(){
 
-const el=document.getElementById("overall-score")
+const el = document.getElementById("overall-score");
 
 if(el){
+    const score = Math.round(skillProfile.overall_score || 0);
+    el.textContent = score;
 
-el.textContent=Math.round(skillProfile.overall_score||0)
-
+    if(score < 40) el.style.color = "#e74c3c";
+    else if(score < 70) el.style.color = "#f39c12";
+    else el.style.color = "#2ecc71";
 }
-
 }
 
 
@@ -541,5 +581,23 @@ window.onload=init
 
 </script>
 
+
+<script>
+const avatar = document.getElementById("userAvatar");
+const dropdown = document.getElementById("userDropdown");
+
+avatar.addEventListener("click", () => {
+  dropdown.classList.toggle("show");
+});
+
+window.addEventListener("click", function(e) {
+  if (!avatar.contains(e.target) && !dropdown.contains(e.target)) {
+    dropdown.classList.remove("show");
+  }
+});
+</script>
+
+
 </body>
 </html>
+

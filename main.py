@@ -225,23 +225,52 @@ def create_skill_profile(db: Session, user_id: int) -> UserSkillProfileRow:
     db.commit()
     db.refresh(profile)
     return profile
+# ---------------------------------------------------------------------------
+# User Skill Profile helpers (DB-backed skill vector)
+# ---------------------------------------------------------------------------
+
+def get_skill_profile(db: Session, user_id: int):
+    return db.query(UserSkillProfileRow).filter(UserSkillProfileRow.user_id == user_id).first()
 
 
-def update_skill_profile(db: Session, user_id: int, skill_data: dict) -> UserSkillProfileRow:
-    """Update an existing skill profile row with the provided skill data."""
+def create_skill_profile(db: Session, user_id: int) -> UserSkillProfileRow:
     profile = get_skill_profile(db, user_id)
+    if profile:
+        return profile
+
+    profile = UserSkillProfileRow(
+        user_id=user_id,
+        technical_skills={},
+        interview_skills={},
+        communication_skills={},
+        overall_score=0.0,
+        interview_count=0,
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+# ✅ ADD THIS FUNCTION RIGHT HERE
+def update_skill_profile(db: Session, user_id: int, skill_data: dict):
+    profile = get_skill_profile(db, user_id)
+
     if not profile:
         profile = create_skill_profile(db, user_id)
 
-    # Update fields if provided
     if "technical_skills" in skill_data:
         profile.technical_skills = skill_data["technical_skills"]
+
     if "interview_skills" in skill_data:
         profile.interview_skills = skill_data["interview_skills"]
+
     if "communication_skills" in skill_data:
         profile.communication_skills = skill_data["communication_skills"]
+
     if "overall_score" in skill_data:
         profile.overall_score = float(skill_data["overall_score"])
+
     if "interview_count" in skill_data:
         profile.interview_count = int(skill_data["interview_count"])
 
@@ -250,8 +279,8 @@ def update_skill_profile(db: Session, user_id: int, skill_data: dict) -> UserSki
     db.add(profile)
     db.commit()
     db.refresh(profile)
-    return profile
 
+    return profile
 # ===========================================================================
 # PAGE ROUTES
 # ===========================================================================
@@ -826,6 +855,8 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
             report_json=json.dumps(report),
         )
         db.add(interview_row)
+        db.commit()
+        db.refresh(interview_row)
 
         # Update rich UserSkillProfile based on this interview
         profile_row = get_or_create_user_profile(db, user)
@@ -927,7 +958,10 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         profile_obj.overall_score = calculate_overall_score(skill_vector)
 
         # Aggregate simple fields for quick display in profile page
-        skills_list = [node.skill_name for node in profile_obj.skill_graph.values()]
+        skills_list = []
+
+        if hasattr(profile_obj, "skill_graph") and profile_obj.skill_graph:
+              skills_list = [node.skill_name for node in profile_obj.skill_graph.values()]
         if profile_obj.skill_graph:
             avg_score = sum(n.score for n in profile_obj.skill_graph.values()) / len(
                 profile_obj.skill_graph
@@ -1138,19 +1172,28 @@ def interview_report_page(
     db: Session = Depends(get_db),
 ):
     """
-    View a past interview report stored in the `interviews` table.
+    View a past interview report stored in DB (secure).
     """
+
+    from models import Interview
+    import json
+
     user = get_current_user(request, db)
     if not user:
         return RedirectResponse("/login")
 
+    # ✅ IMPORTANT: restrict to user's own reports
     interview = (
         db.query(Interview)
-        .filter(Interview.id == interview_id, Interview.user_id == user.id)
+        .filter(
+            Interview.id == interview_id,
+            Interview.user_id == user.id
+        )
         .first()
     )
+
     if not interview:
-        return RedirectResponse("/profile")
+        raise HTTPException(status_code=404, detail="Report not found")
 
     try:
         report = json.loads(interview.report_json)
@@ -1159,7 +1202,11 @@ def interview_report_page(
 
     return templates.TemplateResponse(
         "report.html",
-        {"request": request, "username": user.username, "report": report},
+        {
+            "request": request,
+            "username": user.username,
+            "report": report
+        },
     )
 
 
@@ -1170,14 +1217,21 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
     if not user:
         return RedirectResponse("/login")
 
+    from models import Interview
+    import json
+
+    # Ensure profile exists
     profile_row = get_or_create_user_profile(db, user)
 
-    # Default skill profile
+    # -------------------------------
+    # DEFAULT SKILL PROFILE (fallback)
+    # -------------------------------
     profile_data = {
         "technical_skills": {
             "dsa": 50,
             "dbms": 50,
             "operating_systems": 50,
+            "computer_networks": 50,
             "system_design": 50,
         },
         "interview_skills": {
@@ -1197,7 +1251,9 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
         "overall_score": 50
     }
 
-    # Load stored skill profile
+    # -------------------------------
+    # LOAD STORED SKILL PROFILE
+    # -------------------------------
     if profile_row.profile_json:
         try:
             loaded = json.loads(profile_row.profile_json)
@@ -1205,7 +1261,9 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
         except Exception:
             pass
 
-    # Extracted skills
+    # -------------------------------
+    # EXTRACTED SKILLS
+    # -------------------------------
     extracted_skills = []
     if profile_row.extracted_skills:
         try:
@@ -1213,7 +1271,9 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
         except:
             extracted_skills = []
 
-    # Skill gaps
+    # -------------------------------
+    # SKILL GAPS
+    # -------------------------------
     skill_gaps = []
     if profile_row.skill_gaps:
         try:
@@ -1221,7 +1281,9 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
         except:
             skill_gaps = []
 
-    # Interview history
+    # -------------------------------
+    # FETCH INTERVIEW HISTORY
+    # -------------------------------
     interviews = (
         db.query(Interview)
         .filter(Interview.user_id == user.id)
@@ -1229,19 +1291,40 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
         .all()
     )
 
+    # -------------------------------
+    # GROUP BY ROLE (History section)
+    # -------------------------------
     history_by_role = {}
-    for iv in interviews:
-        history_by_role.setdefault(iv.role, []).append(iv)
 
+    for iv in interviews:
+       normalized_role = iv.role.strip().lower()   # ✅ normalize
+
+       history_by_role.setdefault(normalized_role, []).append(iv)
+
+    # -------------------------------
+    # BUILD TIMELINE (for graphs)
+    # -------------------------------
     timeline_by_role = {}
-    for role, ivs in history_by_role.items():
-        timeline_by_role[role] = [
-            {
-                "label": iv.date.strftime("%Y-%m-%d"),
-                "score": iv.score
-            }
-            for iv in ivs
-        ]
+
+    for iv in interviews:
+        role = iv.role.strip().lower()
+
+        if role not in timeline_by_role:
+            timeline_by_role[role] = []
+
+        timeline_by_role[role].append({
+            "date": iv.date.strftime("%Y-%m-%d"),
+            "score": iv.score
+        })
+
+    # -------------------------------
+    # IMPROVEMENT MESSAGE
+    # -------------------------------
+    improvement_message = (
+        profile_row.improvement_suggestions
+        if profile_row and profile_row.improvement_suggestions
+        else "Keep practicing interviews to improve your profile."
+    )
 
     return templates.TemplateResponse(
         "profile.html",
@@ -1254,6 +1337,7 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
             "skill_gaps": skill_gaps,
             "interview_history_by_role": history_by_role,
             "timeline_by_role": timeline_by_role,
+            "improvement_message": improvement_message
         },
     )
 

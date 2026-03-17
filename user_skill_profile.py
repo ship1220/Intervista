@@ -281,23 +281,34 @@ def update_skill_score(current_score: float, new_score: float) -> float:
 
 
 def update_skill_vector(skill_vector: UserSkillVector, updates: dict) -> UserSkillVector:
-    """
-    Update skill vector values.
-    """
 
     for key, value in updates.items():
 
         if hasattr(skill_vector.technical_skills, key):
-            setattr(skill_vector.technical_skills, key, value)
+            current = getattr(skill_vector.technical_skills, key)
+            setattr(
+                skill_vector.technical_skills,
+                key,
+                update_skill_score(current, value)
+            )
 
         elif hasattr(skill_vector.interview_skills, key):
-            setattr(skill_vector.interview_skills, key, value)
+            current = getattr(skill_vector.interview_skills, key)
+            setattr(
+                skill_vector.interview_skills,
+                key,
+                update_skill_score(current, value)
+            )
 
         elif hasattr(skill_vector.communication_skills, key):
-            setattr(skill_vector.communication_skills, key, value)
+            current = getattr(skill_vector.communication_skills, key)
+            setattr(
+                skill_vector.communication_skills,
+                key,
+                update_skill_score(current, value)
+            )
 
     return skill_vector
-
 
 def calculate_overall_score(skill_vector: UserSkillVector) -> float:
     """

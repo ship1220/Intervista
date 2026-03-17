@@ -183,6 +183,9 @@ You are a technical interviewer evaluating answers for a {role} interview.
 
 Important:
 Answers come from speech transcription. Ignore grammar errors.
+Ignore minor factual inaccuracies if overall understanding is clear.
+ignore irrelevant rambling if core answer is good.
+
 
 Evaluate every answer.
 
