@@ -208,11 +208,28 @@ def extract_json(text: str):
 
     json_str = match.group(0)
 
+    # 🔹 Remove invalid control characters (keep only valid JSON whitespace)
+    json_str = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', json_str)
+
     # 🔹 Remove trailing commas (LLM bug)
     json_str = re.sub(r",\s*}", "}", json_str)
     json_str = re.sub(r",\s*]", "]", json_str)
 
     return json.loads(json_str)
+
+
+def safe_json_loads(json_str: str):
+    """Safely parse JSON string by removing invalid control characters."""
+    import json
+    import re
+    if not json_str:
+        return None
+    # Remove invalid control characters
+    cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', json_str)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
 
 
 def normalize_questions_output(raw: str, count: int = 5) -> list[str]:
@@ -296,7 +313,7 @@ async def evaluate_content(role: str, level: str, questions_answers: list) -> di
 
         parsed = {}
         try:
-            parsed = json.loads(result.output)
+            parsed = safe_json_loads(result.output) or {}
             if not isinstance(parsed, dict):
                 parsed = {}
         except Exception:
@@ -311,12 +328,16 @@ async def evaluate_content(role: str, level: str, questions_answers: list) -> di
         score = max(0, min(100, score))
 
         # Validate and extract lists
-        strengths = parsed.get("strengths", ["Answer attempted."])
-        if not isinstance(strengths, list):
-            strengths = ["Answer attempted."]
-        strengths = [str(s).strip() for s in strengths if s][:3]
-        if not strengths:
-            strengths = ["Answer attempted."]
+        answer_normalized = str(answer or "").strip().lower()
+        if answer_normalized in ["", "(skipped)", "(no response)"]:
+            strengths = ["No answer provided."]
+        else:
+            strengths = parsed.get("strengths", ["Answer attempted."])
+            if not isinstance(strengths, list):
+                strengths = ["Answer attempted."]
+            strengths = [str(s).strip() for s in strengths if s][:3]
+            if not strengths:
+                strengths = ["Answer attempted."]
 
         weaknesses = parsed.get("weaknesses", ["Needs improvement."])
         if not isinstance(weaknesses, list):
@@ -387,7 +408,7 @@ async def evaluate_answers(role: str, questions_answers: list) -> dict:
 
         parsed = {}
         try:
-            parsed = json.loads(result.output)
+            parsed = safe_json_loads(result.output) or {}
         except Exception:
             pass
 
@@ -756,8 +777,7 @@ async def upload_resume(
     # Ask LLM for compact skill profile using the new prompt manager
     try:
         parsed = await generate_resume_skill_profile(text, role, level)
-    except Exception as exc:
-        print("[resume] skill profile generation error:", exc)
+    except Exception:
         parsed = {}
 
     skills = parsed.get("skills") if isinstance(parsed, dict) else None
@@ -807,8 +827,6 @@ async def upload_resume(
 
     db.add(profile_row)
     db.commit()
-
-    print(f"[resume] Stored {len(text)} chars for user {user.username}")
     return {
         "status": "ok",
         "length": len(text),
@@ -898,16 +916,89 @@ def start_interview_page(
 @app.get("/interview/start", response_class=HTMLResponse)
 def start_interview_get(
     request: Request,
-    role: str,
-    level: str,
+    role: str | None = None,
+    level: str | None = None,
     course_id: int | None = None,
     db: Session = Depends(get_db),
 ):
     user = get_current_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
+    effective_role = (role or "").strip()
+    effective_level = (level or "").strip()
+    completed_modules: list[str] = []
+    course_topics: list[str] = []
 
-    return _build_interview_context(request, user, role, level, course_id, db)
+    if course_id is not None:
+        course = db.query(Course).filter(Course.id == course_id).first()
+        if course and course.user_id == user.id:
+            effective_role = (course.role or effective_role or "").strip()
+            effective_level = (course.level or effective_level or "").strip()
+            modules = (
+                db.query(Module)
+                .filter(Module.course_id == course_id)
+                .order_by(Module.order_index.asc())
+                .all()
+            )
+            completed_modules = [m.title for m in modules if m.is_completed and m.title]
+            course_topics = [m.title for m in modules if m.title][:8]
+
+    profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
+    if not effective_role and profile and profile.role_applied_for:
+        effective_role = profile.role_applied_for
+    if not effective_level and profile and profile.current_designation:
+        effective_level = profile.current_designation
+
+    if not effective_role:
+        effective_role = "Software Engineer"
+    if not effective_level:
+        effective_level = "Junior"
+
+    resume_text = (resume_store.get(user.username) or "").strip()
+    if not resume_text and profile and profile.resume_file_path:
+        resume_path = Path(profile.resume_file_path)
+        if resume_path.exists():
+            try:
+                suffix = resume_path.suffix.lower()
+                if suffix == ".pdf":
+                    from pypdf import PdfReader
+                    reader = PdfReader(str(resume_path))
+                    resume_text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+                elif suffix == ".docx":
+                    from docx import Document
+                    doc = Document(str(resume_path))
+                    resume_text = "\n".join(p.text for p in doc.paragraphs).strip()
+                else:
+                    resume_text = resume_path.read_text(encoding="utf-8", errors="ignore").strip()
+            except Exception:
+                resume_text = ""
+    if resume_text:
+        resume_store[user.username] = resume_text
+
+    interview_sessions[user.username] = {
+        "role": effective_role,
+        "level": effective_level,
+        "course_id": course_id,
+        "questions": [],
+        "answers": [],
+        "completed_modules": completed_modules,
+        "course_topics": course_topics,
+        "categories": []
+    }
+
+    logger.info("Interview started")
+
+    return templates.TemplateResponse(
+        "interview.html",
+        {
+            "request": request,
+            "username": user.username,
+            "user_id": user.id,
+            "role": effective_role,
+            "level": effective_level,
+            "course_id": course_id,
+        },
+    )
 
 # ===========================================================================
 # COURSE GENERATION PAGE
@@ -1002,17 +1093,22 @@ async def api_interview_next_question(request: Request, db: Session = Depends(ge
     # -----------------------------
     # LLM CALL (FIXED INPUT)
     # -----------------------------
-    result = await question_chain.invoke(
-        {
-            "role": role,
-            "level": level,
-            "resume_text": resume_text,
-            "completed_modules": completed_modules,
-            "course_topics": course_topics,
-            "previous_questions": previous_questions,
-            "used_categories": used_categories
-        }
-    )
+    course_id = session.get("course_id", body.get("course_id"))
+    llm_payload = {
+        "role": role,
+        "level": level,
+        "resume_text": resume_text,
+        "completed_modules": completed_modules,
+        "course_topics": course_topics,
+        "previous_questions": previous_questions,
+        "used_categories": used_categories
+    }
+    if course_id is not None:
+        llm_payload["context_priority"] = "course_focused"
+        llm_payload["instruction_override"] = "Generate mostly questions from course_topics and completed_modules. Only 20-30% can be resume or general role-based."
+        logger.info("Course-focused interview context applied for user_id=%s course_id=%s", user.id, course_id)
+
+    result = await question_chain.invoke(llm_payload)
 
     if result.status != "success":
         raise HTTPException(status_code=500, detail="Failed to generate next interview question")
@@ -1061,9 +1157,6 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         if not questions_answers:
             raise HTTPException(status_code=400, detail="No questions_answers provided")
 
-        print(f"[evaluate] Received {len(questions_answers)} question-answer pairs")
-        for i, qa in enumerate(questions_answers):
-            print(f"[evaluate] Q{i+1}: {qa.get('question', 'MISSING')[:50]}...")
 
         session = interview_sessions.get(user.username, {})
         role = body.get("role", session.get("role", "Software Developer"))
@@ -1099,9 +1192,7 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
 
         # -- FEATURE 3: Content Analysis (LLM) ------------------------
         content_result = await evaluate_content(role, level, questions_answers)
-        print(f"[evaluate] content_result keys: {list(content_result.keys())}")
         content_answers = content_result.get("answers", [])
-        print(f"[evaluate] content_answers count: {len(content_answers)}")
         aggregate = content_result.get("aggregate", {})
 
         content_scores = [a.get("score", 50) for a in content_answers]
@@ -1134,7 +1225,6 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
             question_text = qa.get("question", "")
             answer_text = qa.get("answer", "")
 
-            print(f"[evaluate] Question {i+1}: {question_text[:50]}...")
 
             # Normalize strengths
             strengths = ca.get("strengths", [])
@@ -1242,8 +1332,7 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
                 )
                 resume_data = ResumeData(skills=[])
                 profile_obj = create_user_profile(basic_info, resume_data)
-        except Exception as exc:
-            print("[profile] error loading existing profile:", exc)
+        except Exception:
             basic_info = BasicUserInfo(
                 user_id=str(user.id),
                 name=user.username,
@@ -1431,8 +1520,6 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         session["answers"] = answers
 
         evaluation = await evaluate_answers(role, answers)
-
-        print(f"[evaluate] batch evaluation result keys: {list(evaluation.keys()) if isinstance(evaluation, dict) else type(evaluation)}")
 
         # Normalize top-level keys (AI may use variant names)
         if isinstance(evaluation, dict):
@@ -1706,6 +1793,83 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
         else "Keep practicing interviews to improve your profile."
     )
 
+    # -------------------------------
+    # COURSE HISTORY
+    # -------------------------------
+    course_history = []
+    courses = (
+        db.query(Course)
+        .filter(Course.user_id == user.id)
+        .order_by(Course.created_at.asc())
+        .all()
+    )
+    for course in courses:
+        modules = (
+            db.query(Module)
+            .filter(Module.course_id == course.id)
+            .order_by(Module.order_index.asc())
+            .all()
+        )
+        module_entries = []
+        for module in modules:
+            attempt = (
+                db.query(ModuleAttempt)
+                .filter(
+                    ModuleAttempt.user_id == user.id,
+                    ModuleAttempt.module_id == module.id
+                )
+                .order_by(ModuleAttempt.created_at.desc())
+                .first()
+            )
+            score = attempt.score if attempt else None
+            attempts = 0
+            answers = []
+            is_passed = False
+            total_questions = attempt.total_questions if attempt else None
+            if attempt:
+                payload = attempt.answers
+                if isinstance(payload, dict):
+                    try:
+                        attempts = int(payload.get("attempt_count", 1))
+                    except Exception:
+                        attempts = 1
+                    is_passed = bool(payload.get("is_passed", False))
+                    stored_answers = payload.get("answers", [])
+                    answers = stored_answers if isinstance(stored_answers, list) else []
+                elif isinstance(payload, list):
+                    attempts = 1
+                    answers = payload
+                    is_passed = bool(score is not None and score >= 2)
+
+            module_entries.append(
+                {
+                    "module_id": module.id,
+                    "title": module.title,
+                    "order_index": module.order_index,
+                    "is_unlocked": module.is_unlocked,
+                    "is_completed": module.is_completed,
+                    "score": score,
+                    "total_questions": total_questions,
+                    "is_passed": is_passed,
+                    "attempts": attempts,
+                    "answers": answers,
+                }
+            )
+
+        course_history.append(
+            {
+                "course_id": course.id,
+                "title": course.title,
+                "role": course.role,
+                "level": course.level,
+                "status": course.status,
+                "created_at": course.created_at.strftime("%Y-%m-%d") if course.created_at else None,
+                "modules": module_entries,
+            }
+        )
+
+    logger.info("Course history built for user_id=%s courses=%s", user.id, len(course_history))
+
     return templates.TemplateResponse(
         "profile.html",
         {
@@ -1717,7 +1881,8 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
             "skill_gaps": skill_gaps,
             "interview_history_by_role": history_by_role,
             "timeline_by_role": timeline_by_role,
-            "improvement_message": improvement_message
+            "improvement_message": improvement_message,
+            "course_history": course_history
         },
     )
 
@@ -1919,9 +2084,6 @@ async def create_course(
             outline_json = extract_json(outline_text)
 
         except Exception as e:
-            print("OUTLINE PARSE FAILED")
-            print("ERROR:", str(e))
-            print("RAW OUTPUT:\n", outline_text[:1000])
 
             match = re.search(r"\{.*\}", outline_text, re.DOTALL)
 
@@ -2008,6 +2170,7 @@ async def create_course(
 
         # ✅ COMMIT AFTER LOOP
         db.commit()
+        logger.info("Course created")
 
         # ✅ RETURN AFTER LOOP
         return RedirectResponse(url=f"/course/{course.id}", status_code=303)
@@ -2112,7 +2275,7 @@ async def get_module(module_id: int, request: Request, db: Session = Depends(get
 
     # ✅ RETURN CACHED CONTENT
     if module.content:
-        logger.info(f"Using cached content for module {module_id} by user {user.id}")
+        logger.info("Using cached module")
         content_text, cached_links = _extract_practice_links(module.content)
         return {
             "module_id": module.id,
@@ -2124,7 +2287,6 @@ async def get_module(module_id: int, request: Request, db: Session = Depends(get
 
     course = db.query(Course).filter(Course.id == module.course_id).first()
 
-    logger.info(f"Generating content for module {module_id} by user {user.id}")
 
     prompt = prompt_manager.get_prompt(
         "course_module_detail",
@@ -2202,6 +2364,7 @@ async def get_module(module_id: int, request: Request, db: Session = Depends(get
         module.content = module.content.strip() + marker
 
     db.commit()
+    logger.info("Module generated")
 
     return {
         "module_id": module.id,
@@ -2252,15 +2415,52 @@ async def submit_quiz(
                 score += 1
 
         passed = score >= 2  # At least 2 out of 3 correct
-
-        # Store attempt
-        attempt = ModuleAttempt(
-            user_id=user.id,
-            module_id=module_id,
-            score=score,
-            answers=user_answers
+        # Store or update attempt
+        attempt = (
+            db.query(ModuleAttempt)
+            .filter(
+                ModuleAttempt.user_id == user.id,
+                ModuleAttempt.module_id == module_id
+            )
+            .order_by(ModuleAttempt.created_at.desc())
+            .first()
         )
-        db.add(attempt)
+        attempt_count = 1
+        if attempt:
+            existing_payload = attempt.answers if isinstance(attempt.answers, dict) else {}
+            try:
+                previous_count = int(existing_payload.get("attempt_count", 1))
+            except Exception:
+                previous_count = 1
+            attempt_count = previous_count + 1
+            attempt.score = score
+            attempt.total_questions = 3
+            attempt.answers = {
+                "answers": user_answers,
+                "is_passed": passed,
+                "attempt_count": attempt_count,
+            }
+        else:
+            attempt = ModuleAttempt(
+                user_id=user.id,
+                module_id=module_id,
+                score=score,
+                total_questions=3,
+                answers={
+                    "answers": user_answers,
+                    "is_passed": passed,
+                    "attempt_count": attempt_count,
+                }
+            )
+            db.add(attempt)
+        logger.info(
+            "Module attempt persisted user_id=%s module_id=%s score=%s passed=%s attempts=%s",
+            user.id,
+            module_id,
+            score,
+            passed,
+            attempt_count,
+        )
 
         next_module_id = None
         # Mark module as completed and unlock next module if passed
@@ -2273,11 +2473,11 @@ async def submit_quiz(
             if next_module:
                 next_module.is_unlocked = True
                 next_module_id = next_module.id
-                logger.info(f"Unlocked next module {next_module_id} for course {course.id}")
+                logger.info("Next module unlocked user_id=%s module_id=%s", user.id, next_module_id)
 
         db.commit()
 
-        logger.info(f"Quiz submitted for module {module_id} by user {user.id}, score {score}, passed {passed}")
+        logger.info("Quiz submitted")
 
         return {
             "score": score,

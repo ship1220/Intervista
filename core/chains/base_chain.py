@@ -147,28 +147,33 @@ class BaseChain:
         if not json_mode:
             return output
         
+        # Clean invalid control characters first
+        cleaned_output = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', output)
+        
         # Try basic JSON parsing first
         try:
-            return json.loads(output.strip())
+            return json.loads(cleaned_output.strip())
         except json.JSONDecodeError:
             pass
         
         # Try extraction strategies
         for strategy in [self._extract_json_strict, self._extract_json_flexible]:
             try:
-                result = strategy(output)
+                result = strategy(cleaned_output)
                 if result:
                     return result
             except Exception:
                 pass
         
         # If all strategies fail, raise error (no silent fallback)
-        logger.error(f"Cannot parse JSON from LLM output: {output[:200]}")
+        logger.error(f"Cannot parse JSON from LLM output: {cleaned_output[:200]}")
         raise ValueError("JSON parsing failed on all strategies")
     
     def _extract_json_strict(self, text: str) -> Optional[Dict]:
         """Extract JSON from text strictly."""
         cleaned = text.strip()
+        # Remove invalid control characters
+        cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', cleaned)
         # Remove markdown blocks
         if cleaned.startswith("```"):
             match = re.search(r"```(?:json)?\s*(.*?)```", cleaned, re.DOTALL)
@@ -190,8 +195,10 @@ class BaseChain:
     
     def _extract_json_flexible(self, text: str) -> Optional[Dict]:
         """Extract JSON from text with relaxed rules."""
+        # Remove invalid control characters
+        cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
         # Try to find any balanced JSON-like structure
-        for match in re.finditer(r'\{[^{}]*\}', text):
+        for match in re.finditer(r'\{[^{}]*\}', cleaned):
             try:
                 return json.loads(match.group())
             except json.JSONDecodeError:
@@ -261,6 +268,8 @@ ORIGINAL PROMPT:
         try:
             # Remove markdown code blocks if present
             cleaned = output.strip()
+            # Remove invalid control characters
+            cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', cleaned)
             if cleaned.startswith("```"):
                 cleaned = re.search(r"```(?:json)?\s*(.*?)```", cleaned, re.DOTALL)
                 if cleaned:

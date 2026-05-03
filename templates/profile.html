@@ -300,6 +300,57 @@ Interview — {{ iv.date.strftime("%Y-%m-%d") }}
 
 </section>
 
+<!-- ================================================= -->
+
+<!-- COURSE HISTORY -->
+
+<!-- ================================================= -->
+
+<section class="card">
+
+<h2>Course History</h2>
+
+{% if course_history %}
+
+{% for course in course_history %}
+
+<details class="history-dropdown">
+
+<summary>
+<a href="/course/{{ course.course_id }}">{{ course.title or (course.role ~ " Course") }}</a>
+{% if course.level %}(Level: {{ course.level }}){% endif %}
+</summary>
+
+<p>
+Role: {{ course.role or "N/A" }} |
+Status: {{ course.status or "N/A" }} |
+Created: {{ course.created_at or "N/A" }}
+</p>
+
+<ul>
+{% for module in course.modules %}
+<li>
+{{ module.order_index + 1 }}. {{ module.title }} —
+{% if module.is_completed %}Completed{% else %}In Progress{% endif %}
+| Attempts: {{ module.attempts }}
+| Score: {% if module.score is not none %}{{ module.score }}{% if module.total_questions %}/{{ module.total_questions }}{% endif %}{% else %}N/A{% endif %}
+| Passed: {% if module.is_passed %}Yes{% else %}No{% endif %}
+</li>
+{% endfor %}
+</ul>
+
+</details>
+
+{% endfor %}
+
+{% else %}
+
+<p>No courses recorded yet.</p>
+
+{% endif %}
+
+</section>
+
 </main>
 
 <script>

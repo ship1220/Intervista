@@ -203,7 +203,7 @@ function renderQuizResult(data) {
 
   if (passed) {
     if (isFinal) {
-      buttons += `<button class="btn" onclick="location.href='/interview/start?role=${encodeURIComponent(data.role || ROLE)}&level=${encodeURIComponent(data.level || LEVEL)}&course_id=${encodeURIComponent(data.course_id || courseId)}'">Start Interview</button>`;
+      buttons += `<button class="btn" onclick="window.location.href='/interview/start?course_id=${encodeURIComponent(data.course_id || courseId)}'">Start Interview</button>`;
     } else if (nextModuleId) {
       buttons += `<a href="/module/${nextModuleId}" class="btn">Go to Next Module</a>`;
     }
