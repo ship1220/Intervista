@@ -200,6 +200,23 @@ Confidence: {{ report.verdict.confidence_level }}
 
 </section>
 
+{% if report.new_course %}
+<section class="card fade-in">
+  <h2>New Course Generated Based on Your Weak Areas</h2>
+  <p>
+    We identified gaps in:
+    {% for category, topics in report.weak_topics.items() %}
+      {% if topics %}
+        <strong>{{ category }}:</strong> {{ topics | join(', ') }}{% if not loop.last %}; {% endif %}
+      {% endif %}
+    {% endfor %}
+  </p>
+  <a href="/course/{{ report.new_course.course_id }}" class="btn btn-primary">
+    Start Your Improvement Course
+  </a>
+</section>
+{% endif %}
+
 
 
 <!-- ===================================================== -->
@@ -210,34 +227,42 @@ Confidence: {{ report.verdict.confidence_level }}
 
 <h2>Voice Analysis</h2>
 
+{% if va and va.confidence_score and va.confidence_score > 0 %}
+
 <div class="metrics-grid">
 
 <div class="metric-card">
-<div class="metric-value">{{ va.speaking_pace_wpm | default(0) }}</div>
+<div class="metric-value">{{ va.speaking_pace_wpm | default('--') }}</div>
 <div class="metric-label">Speaking Pace (WPM)</div>
 </div>
 
 <div class="metric-card">
-<div class="metric-value">{{ va.total_filler_words | default(0) }}</div>
+<div class="metric-value">{{ va.total_filler_words | default('--') }}</div>
 <div class="metric-label">Filler Words</div>
 </div>
 
 <div class="metric-card">
-<div class="metric-value">{{ va.clarity_score | default(0) }}</div>
+<div class="metric-value">{{ va.clarity_score | default('--') }}</div>
 <div class="metric-label">Clarity</div>
 </div>
 
 <div class="metric-card">
-<div class="metric-value">{{ va.engagement_score | default(0) }}</div>
+<div class="metric-value">{{ va.engagement_score | default('--') }}</div>
 <div class="metric-label">Engagement</div>
 </div>
 
 <div class="metric-card">
-<div class="metric-value">{{ va.confidence_score | default(0) }}</div>
+<div class="metric-value">{{ va.confidence_score | round(1) }}</div>
 <div class="metric-label">Confidence</div>
 </div>
 
 </div>
+
+{% else %}
+
+<p style="color: var(--text-muted); font-style: italic;">Audio analysis not available or insufficient data to calculate voice metrics.</p>
+
+{% endif %}
 
 </section>
 

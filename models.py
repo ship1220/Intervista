@@ -254,3 +254,31 @@ class UserSkillProfileRow(Base):
     overall_score = Column(Float, default=0.0)
     interview_count = Column(Integer, default=0)
     last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# =========================
+# REINFORCEMENT LEARNING
+# =========================
+class QTable(Base):
+    __tablename__ = "q_table"
+
+    id = Column(Integer, primary_key=True, index=True)
+    state_id = Column(String, index=True, nullable=False)
+    action_id = Column(String, index=True, nullable=False)
+    q_value = Column(Float, default=0.0)
+    visit_count = Column(Integer, default=0)
+
+
+class UserState(Base):
+    __tablename__ = "user_states"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    state_id = Column(String, nullable=False)
+    weak_topics = Column(JSON, nullable=True)
+    avg_score = Column(Float, default=0.0)
+    last_score = Column(Float, default=0.0)
+    current_proficiency = Column(Integer, default=0)
+    session_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

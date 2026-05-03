@@ -7,10 +7,10 @@
   <title>Course Overview</title>
 </head>
 
-<body>
+<body style="padding-top: 80px;">
 
-<!-- NAVBAR (unchanged) -->
-<nav class="navbar">
+<!-- NAVBAR -->
+<nav class="navbar" style="position: fixed; top: 0; z-index: 1000; width: 100%;">
   <div class="nav-container">
     <h2 class="logo">
       <img src="/static/new_logo.png" class="logo-img">
@@ -41,9 +41,9 @@
   </div>
 </nav>
 
-<main>
-  <section class="card">
-    <h2>{{ course.title }}</h2>
+<main style="padding: 20px;">
+  <section class="card" style="overflow-x: hidden;">
+    <h2 style="font-size: 24px; font-weight: bold; margin-bottom: 15px; color: #222; margin-top: 0;">{{ course.title }}</h2>
     <p style="color: var(--text-muted); margin-bottom: 20px;">{{ course.description }}</p>
 
     <h3>Course Modules</h3>

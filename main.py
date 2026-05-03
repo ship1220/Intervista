@@ -56,6 +56,14 @@ from speech.transcription import (
     compute_overall_score,
     compute_recruiter_verdict,
 )
+from utils.rl_helpers import (
+    get_state_id,
+    calculate_reward,
+    normalize_final_score,
+    log_rl_metrics,
+)
+from services.rl.rl_service import TabularQLearner, INTERVIEW_ACTIONS, COURSE_ACTIONS
+from models import QTable, UserState
 
 Base.metadata.create_all(bind=engine)
 
@@ -215,7 +223,7 @@ def extract_json(text: str):
     json_str = re.sub(r",\s*}", "}", json_str)
     json_str = re.sub(r",\s*]", "]", json_str)
 
-    return json.loads(json_str)
+    return json.loads(json_str, strict=False)
 
 
 def safe_json_loads(json_str: str):
@@ -359,15 +367,37 @@ async def evaluate_content(role: str, level: str, questions_answers: list) -> di
             weak_topics_raw = []
         weak_topics_list = [str(t).strip().lower() for t in weak_topics_raw if t]
         weak_topics_list = list(set(weak_topics_list))[:5]
-
+        
+        # ============================================================
+        # RL: EXTRACT CKFS METRICS (NEW)
+        # ============================================================
+        rl_metrics = {
+            "C": max(0.0, min(1.0, float(parsed.get("C", 0.0)))),
+            "K": max(0.0, min(1.0, float(parsed.get("K", 0.0)))),
+            "F": max(0.0, min(1.0, float(parsed.get("F", 0.0)))),
+            "S": max(0.0, min(1.0, float(parsed.get("S", 0.0))))
+        }
+        # Log RL metrics (no change to existing response structure)
+        try:
+            log_rl_metrics(
+                user_id=None,  # Will be set later in interview flow
+                state_id="",   # Will be computed later
+                metrics=rl_metrics,
+                reward=0.0,     # Will be computed later
+                context="interview_question"
+            )
+        except Exception:
+            pass  # Silent fail on RL metrics logging
+        
         item = {
             "score": score,
             "strengths": strengths,
             "weaknesses": weaknesses,
             "ideal_answer": ideal_answer,
             "weak_topics": weak_topics_list,
+            "_rl_metrics": rl_metrics,  # Internal use only, not sent to frontend
         }
-
+        
         weak_topics.extend(weak_topics_list)
         answers.append(item)
 
@@ -1300,10 +1330,129 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         # Expose weak topics at the top level for report.html
         report["weak_topics"] = categorize_weak_topics(content_result.get("weak_topics", []))
 
+        # ============================================================
+        # RL: COURSE RECOMMENDATION & Q-TABLE UPDATE
+        # ============================================================
+        try:
+            weak_topics = content_result.get("weak_topics", [])
+            if isinstance(weak_topics, str):
+                weak_topics = [weak_topics]
+            weak_topics = [str(t).strip() for t in weak_topics if str(t).strip()]
+
+            state_id = get_state_id(overall, len(weak_topics))
+
+            user_state = db.query(UserState).filter(UserState.user_id == user.id).first()
+            previous_score = float(user_state.last_score) if user_state and user_state.last_score is not None else 0.0
+            prev_state_id = user_state.state_id if user_state else state_id
+
+            course_learner = TabularQLearner(db=db, action_space="course")
+            action = course_learner.select_action(state_id, user_state)
+
+            total_metrics = {"C": 0.0, "K": 0.0, "F": 0.0, "S": 0.0}
+            for answer in content_answers:
+                rl_metrics = answer.get("_rl_metrics", {})
+                for key in total_metrics:
+                    total_metrics[key] += rl_metrics.get(key, 0.0)
+
+            num_questions = len(content_answers) if content_answers else 1
+            avg_metrics = {k: v / num_questions for k, v in total_metrics.items()}
+
+            reward = calculate_reward(avg_metrics, previous_score, normalize_final_score(overall))
+
+            new_course_id = None
+            try:
+                new_course_id = await create_course_internal(
+                    user,
+                    role,
+                    level,
+                    weak_topics,
+                    action,
+                    db,
+                )
+            except Exception as course_error:
+                logger.warning(
+                    "RL course generation failed for action=%s, falling back to revision: %s",
+                    action,
+                    str(course_error),
+                )
+                action = "revision"
+                try:
+                    new_course_id = await create_course_internal(
+                        user,
+                        role,
+                        level,
+                        weak_topics,
+                        action,
+                        db,
+                    )
+                except Exception as fallback_error:
+                    logger.warning(
+                        "RL course generation fallback also failed: %s",
+                        str(fallback_error),
+                    )
+                    new_course_id = None
+
+            new_course = None
+            if new_course_id:
+                new_course_row = db.query(Course).filter(Course.id == new_course_id).first()
+                if new_course_row:
+                    new_course = {
+                        "course_id": new_course_row.id,
+                        "title": new_course_row.title,
+                    }
+
+            course_learner.update_q_table(prev_state_id, action, reward, state_id)
+
+            if user_state:
+                user_state.state_id = state_id
+                user_state.last_score = overall
+                user_state.avg_score = (
+                    user_state.avg_score * user_state.session_count + overall
+                ) / (user_state.session_count + 1)
+                user_state.current_proficiency = user_state.avg_score / 100.0
+                user_state.weak_topics = weak_topics
+                user_state.session_count += 1
+            else:
+                user_state = UserState(
+                    user_id=user.id,
+                    state_id=state_id,
+                    weak_topics=weak_topics,
+                    avg_score=overall,
+                    last_score=overall,
+                    current_proficiency=overall / 100.0,
+                    session_count=1,
+                )
+                db.add(user_state)
+
+            db.flush()
+
+            report["new_course_id"] = new_course_id
+            if new_course is not None:
+                report["new_course"] = new_course
+            report["recommended_action"] = action
+            report["rl_metrics"] = {
+                "state": state_id,
+                "previous_state": prev_state_id,
+                "metrics": avg_metrics,
+                "reward": reward,
+                "action": action,
+                "new_course_id": new_course_id,
+            }
+
+            logger.info(
+                "RL course generation: state_id=%s action=%s weak_topics=%s new_course_id=%s",
+                state_id,
+                action,
+                weak_topics,
+                new_course_id,
+            )
+        except Exception as e:
+            logger.warning(f"RL course recommendation failed: {str(e)}", exc_info=False)
+            report["new_course_id"] = None
+            report["recommended_action"] = "revision"
+
         # Store report for the /report page (latest only)
         report_store[user.username] = report
-
-        # Persist high-level interview record with full report JSON
         interview_row = Interview(
             user_id=user.id,
             role=role,
@@ -2182,6 +2331,85 @@ async def create_course(
         raise HTTPException(status_code=500, detail="Failed to create course")
 
 
+async def create_course_internal(
+    user,
+    role: str,
+    level: str,
+    weak_topics: list[str],
+    action: str,
+    db: Session,
+) -> int | None:
+    prompt_skill = role
+    weak_topics = [str(t).strip() for t in weak_topics if str(t).strip()]
+
+    if action == "revision":
+        prompt_skill = f"{role} (review weak topics: {', '.join(weak_topics)})"
+    elif action == "easy":
+        prompt_skill = f"{role} (easy learning path with fundamentals and weak topics)"
+    elif action == "mixed":
+        prompt_skill = f"{role} (mixed weak topics and related new concepts: {', '.join(weak_topics[:3])})"
+    elif action == "advanced":
+        prompt_skill = f"{role} (advanced learning path with deeper coverage of weak areas)"
+
+    outline_prompt_input = {
+        "skill": prompt_skill,
+        "level": level,
+        "duration_hours": 20,
+    }
+
+    outline_prompt = prompt_manager.get_prompt("course_outline", **outline_prompt_input)
+    outline_text = await llm_service.invoke(outline_prompt)
+
+    try:
+        outline_json = extract_json(outline_text)
+    except Exception:
+        match = re.search(r"\{.*\}", outline_text, re.DOTALL)
+        if match:
+            try:
+                outline_json = json.loads(match.group(0))
+            except Exception:
+                return None
+        else:
+            return None
+
+    course = Course(
+        user_id=user.id,
+        role=role,
+        title=outline_json.get("course_title", f"{level.title()} {role} Course"),
+        description=outline_json.get("description", ""),
+        level=level,
+        status="generated",
+    )
+    db.add(course)
+    db.flush()
+
+    outline_modules = outline_json.get("modules", [])
+    if not isinstance(outline_modules, list) or len(outline_modules) == 0:
+        outline_modules = [{"module_title": wt, "topics": [wt]} for wt in weak_topics[:3]]
+
+    total_modules = len(outline_modules)
+    for idx, mod_data in enumerate(outline_modules):
+        title = mod_data.get("module_title") or mod_data.get("title") or f"Module {idx+1}"
+        description = (
+            ", ".join(mod_data.get("topics", []))
+            if mod_data.get("topics")
+            else mod_data.get("description", "")
+        )
+        module = Module(
+            course_id=course.id,
+            title=title,
+            description=description,
+            order_index=idx,
+            is_unlocked=(idx == 0),
+            is_final=(idx == total_modules - 1),
+        )
+        db.add(module)
+        db.flush()
+
+    db.commit()
+    return course.id
+
+
 @app.get("/course/{course_id}", response_class=HTMLResponse)
 def course_page(request: Request, course_id: int, db: Session = Depends(get_db)):
     user = get_current_user(request, db)
@@ -2303,6 +2531,7 @@ async def get_module(module_id: int, request: Request, db: Session = Depends(get
         module_json = extract_json(raw)
     except Exception as e:
         logger.error(f"Module parse error for {module_id}: {str(e)}")
+        logger.error(f"Raw LLM response: {repr(raw)}")
         raise HTTPException(
             status_code=500,
             detail="Failed to parse module content from LLM"

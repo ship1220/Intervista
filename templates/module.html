@@ -5,10 +5,41 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="/static/styles.css" />
   <title>{{ module_title }}</title>
+  <style>
+    body {
+      padding-top: 80px;
+    }
+    .module-container {
+      overflow-x: hidden;
+    }
+    .module-content {
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+      white-space: normal;
+      max-width: 100%;
+    }
+    .module-section {
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+    }
+    pre, code {
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-width: 100%;
+      overflow-x: auto;
+    }
+    .module-title {
+      font-size: 24px;
+      font-weight: bold;
+      margin-bottom: 15px;
+      color: #222;
+      margin-top: 0;
+    }
+  </style>
 </head>
 <body>
 
-<nav class="navbar">
+<nav class="navbar" style="position: fixed; top: 0; z-index: 1000; width: 100%;">
   <div class="nav-container">
     <h2 class="logo">
       <img src="/static/new_logo.png" alt="Intervista AI logo" class="logo-img">
@@ -37,10 +68,10 @@
 </nav>
 
 <main>
-  <section class="card" id="module-card">
+  <section class="card module-container" id="module-card">
     <div id="module-header">
       <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-        <h2>{{ module_title }}</h2>
+        <h2 class="module-title">{{ module_title }}</h2>
         {% if is_final %}
           <span class="badge" style="background:#fde68a; color:#92400e;">Final Assessment</span>
         {% endif %}
@@ -95,7 +126,7 @@ function renderModule(data) {
   const quiz = Array.isArray(data.quiz) ? data.quiz : [];
   const practiceLinks = Array.isArray(data.practice_links) ? data.practice_links : [];
 
-  let html = `<div class="module-section">${marked.parse(markdown)}</div>`;
+  let html = `<div class=\"module-section module-content\">${marked.parse(markdown)}</div>`;
 
   if (practiceLinks.length) {
     html += '<div class="module-section"><h3>Practice Problems</h3><ul style="padding-left:20px;">';

@@ -114,7 +114,7 @@ Return ONLY JSON:
         )
     
     def _register_evaluation_content(self):
-        """Evaluate interview answer."""
+        """Evaluate interview answer with CKFS metrics for RL integration."""
         template = """You are evaluating an interview answer for a {level} {role} candidate.
 
 IMPORTANT: Answers come from speech transcription. Ignore grammar errors.
@@ -138,8 +138,18 @@ Return ONLY valid JSON with no markdown:
  "strengths": ["strength1", "strength2"],
  "weaknesses": ["weakness1", "weakness2"],
  "ideal_answer": "short example ideal answer on how the user should've answered (max 5 sentences)",
- "weak_topics": ["topic1", "topic2"]
+ "weak_topics": ["topic1", "topic2"],
+ "C": <float 0.0-1.0>,
+ "K": <float 0.0-1.0>,
+ "F": <float 0.0-1.0>,
+ "S": <float 0.0-1.0>
 }}
+
+Metrics:
+- C (Correctness): How correct/accurate the answer is (0.0=completely wrong, 1.0=perfect)
+- K (Knowledge/Confidence): Candidate's knowledge depth and confidence (0.0=no confidence, 1.0=very confident)
+- F (Fluency): How smoothly/clearly the answer flows (0.0=very rough, 1.0=very fluent)
+- S (Sentiment): Positive sentiment and engagement (0.0=negative/disengaged, 1.0=positive/highly engaged)
 
 STRICT: Return ONLY valid JSON. No extra text. No explanation. Output must start with {{ and end with }}."""
         
@@ -147,7 +157,7 @@ STRICT: Return ONLY valid JSON. No extra text. No explanation. Output must start
             "evaluate_answer",
             template,
             PromptCategory.EVALUATION,
-            "2.0"
+            "3.0"
         )
     
     def _register_performance_summary(self):
