@@ -139,6 +139,7 @@ Submit Answer
 
 const ROLE="{{ role }}";
 const LEVEL="{{ level }}";
+const USER_ID="{{ user_id }}";
 const TOTAL_QUESTIONS=5;
 
 let questions=[];
@@ -154,23 +155,11 @@ let manualSubmitMode=false;
 
 /* BUTTONS */
 
-document.getElementById("btn-skip").onclick = () => {
+document.getElementById("btn-skip").onclick = async () => {
 
 if(answerSubmitted) return;
 
-answerSubmitted=true;
-
-stopListening();
-
-answers.push({
-question: questions[currentIdx],
-answer: "(skipped)",
-duration:0
-});
-
-currentIdx++;
-
-showQuestion();
+await processAnswer("(skipped)", 0);
 
 };
 
@@ -183,25 +172,12 @@ evaluateAll();
 };
 
 
-document.getElementById("btn-submit-code").onclick = () => {
+document.getElementById("btn-submit-code").onclick = async () => {
 
 if(answerSubmitted) return;
 
-answerSubmitted=true;
-
-stopListening();
-
 const answer=document.getElementById("live-transcript").value.trim();
-
-answers.push({
-question:questions[currentIdx],
-answer:answer||"(no response)",
-duration:120
-});
-
-currentIdx++;
-
-showQuestion();
+await processAnswer(answer||"(no response)", 120);
 
 };
 
@@ -396,41 +372,72 @@ startListening();
 
 
 
-function finishAnswer(){
+async function finishAnswer(){
 
 if(answerSubmitted) return;
 
-answerSubmitted=true;
-
-clearTimeout(typingTimer);
-
-stopListening();
-
 const answer=document.getElementById("live-transcript").value.trim();
+await processAnswer(answer||"(no response)", 30);
 
-answers.push({
-question:questions[currentIdx],
-answer:answer||"(no response)",
-duration:30
-});
+}
 
-currentIdx++;
+async function processAnswer(answerText, duration = 30){
+    if(answerSubmitted) return;
 
-showQuestion();
+    answerSubmitted=true;
+    clearTimeout(typingTimer);
+    stopListening();
 
+    const qObj = questions[currentIdx];
+    const questionText = typeof qObj === 'string' ? qObj : qObj.question || qObj;
+
+    answers.push({
+        question: questionText,
+        answer: answerText || "(no response)",
+        duration: duration,
+    });
+
+    currentIdx++;
+
+    if(answers.length >= TOTAL_QUESTIONS){
+        evaluateAll();
+        return;
+    }
+
+    if(currentIdx >= questions.length){
+        const history = answers.map(item => ({
+            question: item.question,
+            answer: item.answer,
+        }));
+        const nextQuestion = await fetchNextQuestion(history);
+        questions.push(nextQuestion);
+    }
+
+    showQuestion();
 }
 
 
 
 /* API */
 
-async function fetchQuestions(){
+async function fetchNextQuestion(history = []){
 
-const resp=await fetch(`/api/interview/questions?role=${encodeURIComponent(ROLE)}&level=${encodeURIComponent(LEVEL)}&count=${TOTAL_QUESTIONS}`);
+    const resp = await fetch("/api/interview/next_question", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+            user_id: USER_ID,
+            history: history,
+            role: ROLE,
+            level: LEVEL,
+        }),
+    });
 
-const data=await resp.json();
+    if(!resp.ok){
+        throw new Error(`Failed to fetch next question (${resp.status})`);
+    }
 
-return data.questions||[];
+    return await resp.json();
 
 }
 
@@ -468,7 +475,7 @@ window.location.href="/report";
 
 try{
 
-questions=await fetchQuestions();
+questions=[await fetchNextQuestion([])];
 
 if(!questions.length) throw new Error("No questions");
 

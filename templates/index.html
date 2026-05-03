@@ -81,20 +81,19 @@
       <h2>What would you like to do?</h2>
       <p id="role-display" style="color: var(--text-muted); margin-bottom: 20px;"></p>
 
-      <div style="display:flex;gap:16px;flex-wrap:wrap;justify-content:center;">
+      <div style="display:flex; gap:16px; flex-wrap:wrap; justify-content:center; align-items: center;">
         <form id="interview-form" method="post" action="/start_interview/">
           <input type="hidden" id="hidden-role" name="role">
           <input type="hidden" id="hidden-level" name="level">
-
-
-          <button type="submit" class="btn" style="width:220px;" id="btn-interview">
+          <button type="submit" class="btn" style="width:220px; height: 44px;" id="btn-interview">
             Take Voice Interview
           </button>
+        </form>
 
-        <form id="roadmap-form" method="post" action="/generate_course/">
+        <form id="roadmap-form" method="post" action="/api/course/create">
           <input type="hidden" id="hidden-role-roadmap" name="role">
           <input type="hidden" id="hidden-designation" name="level">
-          <button type="submit" class="btn outline" style="width:220px;" id="btn-course">
+          <button type="submit" class="btn outline" style="width:220px; height: 44px;" id="btn-course">
             Generate Course
           </button>
         </form>

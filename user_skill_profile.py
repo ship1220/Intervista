@@ -221,6 +221,8 @@ class UserSkillProfile(BaseModel):
 
     courses: List[CourseProgress] = Field(default_factory=list)
 
+    weak_topics: List[str] = Field(default_factory=list)
+
     last_updated: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -239,37 +241,57 @@ def create_user_profile(basic_info: BasicUserInfo, resume_data: ResumeData) -> U
     )
 
 
-def detect_weaknesses(skill_vector: UserSkillVector) -> list[str]:
+def detect_weaknesses(profile: UserSkillProfile) -> list[str]:
     """
-    Detect weak skills below threshold.
+    Detect weak skills below threshold and update profile.
     """
     weaknesses = []
 
-    for name, value in skill_vector.technical_skills.model_dump().items():
-        if value < 40:
-            weaknesses.append(name)
+    if not hasattr(profile, 'technical_skills') or profile.technical_skills is None:
+        return weaknesses
 
-    for name, value in skill_vector.interview_skills.model_dump().items():
-        if value < 40:
-            weaknesses.append(name)
+    try:
+        for name, value in profile.technical_skills.model_dump().items():
+            if value < 40:
+                weaknesses.append(name)
+    except Exception:
+        pass
 
-    for name, value in skill_vector.communication_skills.model_dump().items():
-        if value < 40:
-            weaknesses.append(name)
+    try:
+        for name, value in profile.interview_skills.model_dump().items():
+            if value < 40:
+                weaknesses.append(name)
+    except Exception:
+        pass
+
+    try:
+        for name, value in profile.communication_skills.model_dump().items():
+            if value < 40:
+                weaknesses.append(name)
+    except Exception:
+        pass
+
+    # Update profile weak_topics
+    if weaknesses:
+        profile.weak_topics = list(set(list(profile.weak_topics) + weaknesses))
 
     return weaknesses
 
 
-def recommend_micro_courses(weak_topics: list[str]) -> list[dict]:
+def recommend_micro_courses(profile: UserSkillProfile) -> list[dict]:
     """
-    Generate micro-learning suggestions.
+    Generate micro-learning suggestions based on weak topics.
     """
+    weak_topics = getattr(profile, 'weak_topics', [])
+    if not weak_topics:
+        weak_topics = []
+    
     return [
         {
             "topic": topic,
             "course": f"Practice and revise {topic}",
         }
-        for topic in weak_topics
+        for topic in weak_topics if isinstance(topic, str) and topic.strip()
     ]
 
 

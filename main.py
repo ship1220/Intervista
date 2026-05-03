@@ -1,26 +1,23 @@
 # main.py — Refactored async FastAPI application
 
+import asyncio
 import io
 import json
+import logging
+import os
 import re
 import time
-from pathlib import Path
-import models
 from datetime import datetime, timezone, timedelta
-from fastapi import FastAPI, Request, Form, Depends, HTTPException, UploadFile, File
+from pathlib import Path
+from fastapi import FastAPI, Request, Form, Depends, HTTPException, UploadFile, File, Body
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
-from ai_service import transcribe_audio
 from sse_starlette.sse import EventSourceResponse
-from database import Base, engine
-Base.metadata.create_all(bind=engine)
-import os
-import shutil
-UPLOAD_DIR = "uploads"
-from database import SessionLocal
+from database import Base, engine, SessionLocal
 from models import (
     User,
     InterviewAttempt,
@@ -28,21 +25,10 @@ from models import (
     UserProfile,
     Interview,
     UserSkillProfileRow,
+    Course,
+    Module,
+    ModuleAttempt,
 )
-from ai_service import (
-    generate_content, extract_json, evaluate_answers,
-    analyze_speech_delivery, compute_confidence_score,
-    evaluate_content, generate_performance_summary,
-    compute_overall_score, compute_recruiter_verdict,
-)
-from prompts import (
-    interview_questions_prompt,
-    interview_questions_with_resume_prompt,
-    batch_evaluation_prompt,
-    course_outline_prompt,
-    course_module_detail_prompt,
-)
-from prompts import resume_skill_profile_prompt
 from user_skill_profile import (
     BasicUserInfo,
     ResumeData,
@@ -58,6 +44,59 @@ from user_skill_profile import (
     calculate_overall_score,
     record_interview_result,
 )
+from core.llm.llm_service import LLMService
+from core.prompts.prompt_manager import PromptManager
+from services.rag.retriever import get_retriever
+from services.rag.rag_pipeline import get_or_create_rag_pipeline, initialize_rag
+from core.chains.base_chain import InterviewQuestionChain, EvaluationChain, SummaryChain
+from speech.transcription import (
+    transcribe_audio,
+    analyze_speech_delivery,
+    compute_confidence_score,
+    compute_overall_score,
+    compute_recruiter_verdict,
+)
+
+Base.metadata.create_all(bind=engine)
+
+
+def ensure_database_schema(engine):
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+
+    with engine.begin() as conn:
+        if "courses" in table_names:
+            course_cols = {col["name"] for col in inspector.get_columns("courses")}
+            if "role" not in course_cols:
+                conn.execute(text('ALTER TABLE courses ADD COLUMN role VARCHAR;'))
+            if "created_at" not in course_cols:
+                conn.execute(text('ALTER TABLE courses ADD COLUMN created_at TIMESTAMP;'))
+            if "updated_at" not in course_cols:
+                conn.execute(text('ALTER TABLE courses ADD COLUMN updated_at TIMESTAMP;'))
+
+        if "modules" in table_names:
+            module_cols = {col["name"] for col in inspector.get_columns("modules")}
+            if "is_final" not in module_cols:
+                conn.execute(text('ALTER TABLE modules ADD COLUMN is_final BOOLEAN DEFAULT FALSE;'))
+
+
+ensure_database_schema(engine)
+
+import shutil
+
+UPLOAD_DIR = "uploads"
+
+# New architecture instances
+llm_service = LLMService()
+prompt_manager = PromptManager()
+retriever = get_retriever()
+
+# RAG Pipeline - initialized on startup
+rag_pipeline = None
+
+question_chain = InterviewQuestionChain(llm_service, prompt_manager, retriever)
+evaluation_chain = EvaluationChain(llm_service, prompt_manager, retriever)
+summary_chain = SummaryChain(llm_service, prompt_manager, retriever)
 
 # ------------------------------------------------------------------
 # Helper Functions
@@ -95,8 +134,11 @@ def categorize_weak_topics(weak_topics: list[str]) -> dict[str, list[str]]:
 # APP INIT
 # ===========================================================================
 app = FastAPI()
-templates = Jinja2Templates(directory="templates")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+BASE_DIR = Path(__file__).parent
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+logger = logging.getLogger(__name__)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -108,6 +150,302 @@ resume_store: dict[str, str] = {}
 
 # In-memory report store (latest report per user)
 report_store: dict[str, dict] = {}
+
+
+# ===========================================================================
+# RAG PIPELINE STARTUP EVENT
+# ===========================================================================
+@app.on_event("startup")
+async def startup_rag_pipeline():
+    """Initialize RAG pipeline on application startup."""
+
+    global rag_pipeline
+    logger.info("Starting RAG pipeline initialization...")
+
+    try:
+        rag_pipeline = get_or_create_rag_pipeline()
+        asyncio.create_task(initialize_rag_async())
+        logger.info("RAG pipeline core created; async initialization task started")
+    except Exception:
+        logger.exception("RAG pipeline startup failed")
+        rag_pipeline = None
+
+
+async def initialize_rag_async():
+    """Initialize RAG asynchronously."""
+    if rag_pipeline is None:
+        logger.warning("RAG async initialization skipped because the pipeline instance is unavailable")
+        return
+
+    try:
+        await initialize_rag()
+        logger.info("RAG pipeline initialized successfully")
+    except Exception:
+        logger.exception("RAG pipeline async initialization failed")
+
+
+# ===========================================================================
+# AI SERVICE HELPERS
+# ===========================================================================
+
+def extract_json(text: str):
+    import json
+    import re
+
+    if not text:
+        raise ValueError("Empty LLM response")
+
+    # 🔹 Remove markdown code blocks
+    text = text.strip()
+    text = re.sub(r"^```json", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^```", "", text)
+    text = re.sub(r"```$", "", text)
+
+    # 🔹 Extract JSON object
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        raise ValueError("No JSON object found in response")
+
+    json_str = match.group(0)
+
+    # 🔹 Remove trailing commas (LLM bug)
+    json_str = re.sub(r",\s*}", "}", json_str)
+    json_str = re.sub(r",\s*]", "]", json_str)
+
+    return json.loads(json_str)
+
+
+def normalize_questions_output(raw: str, count: int = 5) -> list[str]:
+    questions = []
+
+    if raw:
+        try:
+            parsed = extract_json(raw)
+            if isinstance(parsed, list):
+                questions = parsed
+            elif isinstance(parsed, dict):
+                if "questions" in parsed:
+                    questions = parsed["questions"]
+                elif "question" in parsed:
+                    questions = parsed["question"]
+                else:
+                    for value in parsed.values():
+                        if isinstance(value, list):
+                            questions = value
+                            break
+        except Exception:
+            # Fall back to regex and heuristic extraction
+            matches = re.findall(r'"question"\s*:\s*"([^"]+)"', raw)
+            if matches:
+                questions = matches
+            else:
+                questions = [
+                    line.strip().lstrip("0123456789.)- ")
+                    for line in raw.splitlines()
+                    if line.strip().endswith("?")
+                ]
+
+    cleaned_questions = []
+    for q in questions:
+        if isinstance(q, str):
+            cleaned_questions.append(q.strip())
+        elif isinstance(q, dict):
+            if "question" in q:
+                cleaned_questions.append(str(q["question"]).strip())
+            elif "text" in q:
+                cleaned_questions.append(str(q["text"]).strip())
+
+    return [q for q in cleaned_questions if q][:count]
+
+
+async def generate_interview_questions(role: str, level: str, count: int = 5, resume_text: str = "") -> list[str]:
+    result = await question_chain.invoke(
+        {
+            "role": role,
+            "level": level,
+            "count": count,
+            "resume_text": resume_text,
+        }
+    )
+
+    if result.status != "success":
+        return []
+
+    try:
+        return normalize_questions_output(result.output, count)
+    except Exception:
+        return []
+
+
+async def evaluate_content(role: str, level: str, questions_answers: list) -> dict:
+    answers = []
+    weak_topics = []
+
+    for qa in questions_answers:
+        question = qa.get("question", "")
+        answer = qa.get("answer", "")
+
+        result = await evaluation_chain.invoke(
+            {
+                "role": role,
+                "level": level,
+                "question": question,
+                "answer": answer,
+            }
+        )
+
+        parsed = {}
+        try:
+            parsed = json.loads(result.output)
+            if not isinstance(parsed, dict):
+                parsed = {}
+        except Exception:
+            parsed = {}
+
+        # Validate and extract score
+        score = parsed.get("score", 0)
+        try:
+            score = float(score) if score else 0
+        except (TypeError, ValueError):
+            score = 0
+        score = max(0, min(100, score))
+
+        # Validate and extract lists
+        strengths = parsed.get("strengths", ["Answer attempted."])
+        if not isinstance(strengths, list):
+            strengths = ["Answer attempted."]
+        strengths = [str(s).strip() for s in strengths if s][:3]
+        if not strengths:
+            strengths = ["Answer attempted."]
+
+        weaknesses = parsed.get("weaknesses", ["Needs improvement."])
+        if not isinstance(weaknesses, list):
+            weaknesses = ["Needs improvement."]
+        weaknesses = [str(w).strip() for w in weaknesses if w][:3]
+        if not weaknesses:
+            weaknesses = ["Needs improvement."]
+
+        # Validate ideal_answer
+        ideal_answer = parsed.get("ideal_answer", "Ideal answer unavailable.")
+        if not isinstance(ideal_answer, str):
+            ideal_answer = str(ideal_answer) if ideal_answer else "Ideal answer unavailable."
+
+        # Validate weak_topics - MUST be list
+        weak_topics_raw = parsed.get("weak_topics", [])
+        if isinstance(weak_topics_raw, str):
+            weak_topics_raw = [weak_topics_raw]
+        if not isinstance(weak_topics_raw, list):
+            weak_topics_raw = []
+        weak_topics_list = [str(t).strip().lower() for t in weak_topics_raw if t]
+        weak_topics_list = list(set(weak_topics_list))[:5]
+
+        item = {
+            "score": score,
+            "strengths": strengths,
+            "weaknesses": weaknesses,
+            "ideal_answer": ideal_answer,
+            "weak_topics": weak_topics_list,
+        }
+
+        weak_topics.extend(weak_topics_list)
+        answers.append(item)
+
+    # Deduplicate and clean weak_topics
+    weak_topics_final = list(set([t.strip().lower() for t in weak_topics if t]))
+    weak_topics_final = [t for t in weak_topics_final if t][:10]
+
+    scores = [a["score"] for a in answers] if answers else [0]
+    avg_score = sum(scores) / len(scores) if scores else 0
+
+    return {
+        "answers": answers,
+        "weak_topics": weak_topics_final,
+        "overall_feedback": "",
+        "aggregate": {
+            "technical_score": round(avg_score),
+            "communication_score": round(avg_score * 0.9),
+            "overall_score": round(avg_score),
+        },
+    }
+
+
+async def evaluate_answers(role: str, questions_answers: list) -> dict:
+    per_question = []
+
+    for qa in questions_answers:
+        question = qa.get("question", "")
+        answer = qa.get("answer", "")
+
+        result = await evaluation_chain.invoke(
+            {
+                "role": role,
+                "level": "Junior",
+                "question": question,
+                "answer": answer,
+            }
+        )
+
+        parsed = {}
+        try:
+            parsed = json.loads(result.output)
+        except Exception:
+            pass
+
+        per_question.append({
+            "question": question,
+            "candidate_answer": answer,
+            "feedback": parsed.get("strengths", []),
+            "improved_answer": parsed.get("ideal_answer", ""),
+        })
+
+    return {
+        "feedback_per_question": per_question,
+        "improvement_tips": [
+            "Practice structuring your answers with clear examples.",
+            "Use the STAR method for behavioral responses.",
+            "Focus on clarity, confidence, and relevance to the role.",
+        ],
+        "learning_resources": [
+            {"topic": "Interview Preparation", "resource": "Practice common interview questions and structure answers clearly."}
+        ],
+    }
+
+
+async def generate_performance_summary(report_data: dict) -> str:
+    result = await summary_chain.invoke(
+        {
+            "role": report_data.get("candidate_profile", {}).get("role", "Candidate"),
+            "score": report_data.get("overall_score", 0),
+            "weak_topics": report_data.get("weak_topics", []),
+            "attempted": len([
+                a for a in report_data.get("detailed_answers", [])
+                if a.get("transcript") not in ["", "(skipped)", "(no response)"]
+            ]),
+        }
+    )
+
+    return result.output or "Summary unavailable."
+
+
+async def generate_resume_skill_profile(resume_text: str, role: str, level: str) -> dict:
+    prompt = prompt_manager.get_prompt(
+        "resume_skill_profile",
+        resume_text=resume_text,
+        role=role,
+        experience_level=level,
+    )
+
+    raw = await llm_service.invoke(prompt, use_cache=False, json_mode=True)
+    try:
+        return extract_json(raw)
+    except Exception:
+        return {
+            "identified_skills": [],
+            "skill_gaps": [],
+            "missing_for_role": [],
+            "strength_percentage": 0,
+            "improvement_suggestions": "Unable to parse resume insights.",
+        }
 
 
 # ===========================================================================
@@ -225,34 +563,6 @@ def create_skill_profile(db: Session, user_id: int) -> UserSkillProfileRow:
     db.commit()
     db.refresh(profile)
     return profile
-# ---------------------------------------------------------------------------
-# User Skill Profile helpers (DB-backed skill vector)
-# ---------------------------------------------------------------------------
-
-def get_skill_profile(db: Session, user_id: int):
-    return db.query(UserSkillProfileRow).filter(UserSkillProfileRow.user_id == user_id).first()
-
-
-def create_skill_profile(db: Session, user_id: int) -> UserSkillProfileRow:
-    profile = get_skill_profile(db, user_id)
-    if profile:
-        return profile
-
-    profile = UserSkillProfileRow(
-        user_id=user_id,
-        technical_skills={},
-        interview_skills={},
-        communication_skills={},
-        overall_score=0.0,
-        interview_count=0,
-    )
-    db.add(profile)
-    db.commit()
-    db.refresh(profile)
-    return profile
-
-
-# ✅ ADD THIS FUNCTION RIGHT HERE
 def update_skill_profile(db: Session, user_id: int, skill_data: dict):
     profile = get_skill_profile(db, user_id)
 
@@ -443,13 +753,9 @@ async def upload_resume(
     # Create / update structured skill profile using the resume
     profile_row = get_or_create_user_profile(db, user)
 
-    # Ask LLM for compact skill profile
+    # Ask LLM for compact skill profile using the new prompt manager
     try:
-        from ai_service import generate_content, extract_json
-
-        prompt = resume_skill_profile_prompt(text, role, level)
-        raw = await generate_content(prompt, use_cache=False, json_mode=True)
-        parsed = extract_json(raw)
+        parsed = await generate_resume_skill_profile(text, role, level)
     except Exception as exc:
         print("[resume] skill profile generation error:", exc)
         parsed = {}
@@ -536,8 +842,78 @@ async def transcribe_endpoint(file: UploadFile = File(...)):
 # ===========================================================================
 # INTERVIEW — START (returns page for voice interview)
 # ===========================================================================
+def _build_interview_context(request: Request, user, role: str, level: str, course_id: int | None, db: Session):
+    completed_modules = []
+    course_topics = []
+
+    if course_id is not None:
+        course = db.query(Course).filter(Course.id == course_id).first()
+        if course and course.user_id == user.id:
+            modules = (
+                db.query(Module)
+                .filter(Module.course_id == course_id)
+                .order_by(Module.order_index.asc())
+                .all()
+            )
+            completed_modules = [m.title for m in modules if m.is_completed]
+            course_topics = [m.title for m in modules if m.title]
+
+    interview_sessions[user.username] = {
+        "role": role,
+        "level": level,
+        "course_id": course_id,
+        "questions": [],
+        "answers": [],
+        "completed_modules": completed_modules,
+        "course_topics": course_topics,
+        "categories": []
+    }
+
+    return templates.TemplateResponse(
+        "interview.html",
+        {
+            "request": request,
+            "username": user.username,
+            "user_id": user.id,
+            "role": role,
+            "level": level,
+            "course_id": course_id,
+        },
+    )
+
 @app.post("/start_interview/", response_class=HTMLResponse)
 def start_interview_page(
+    request: Request,
+    role: str = Form(...),
+    level: str = Form(...),
+    course_id: int | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    return _build_interview_context(request, user, role, level, course_id, db)
+
+@app.get("/interview/start", response_class=HTMLResponse)
+def start_interview_get(
+    request: Request,
+    role: str,
+    level: str,
+    course_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    return _build_interview_context(request, user, role, level, course_id, db)
+
+# ===========================================================================
+# COURSE GENERATION PAGE
+# ===========================================================================
+@app.post("/generate_course/", response_class=HTMLResponse)
+def generate_course_page(
     request: Request,
     role: str = Form(...),
     level: str = Form(...),
@@ -548,7 +924,7 @@ def start_interview_page(
         raise HTTPException(status_code=401, detail="Not logged in")
 
     return templates.TemplateResponse(
-        "interview.html",
+        "course.html",
         {
             "request": request,
             "username": user.username,
@@ -556,123 +932,114 @@ def start_interview_page(
             "level": level,
         },
     )
+
 # ===========================================================================
-# INTERVIEW API — Generate questions (called by JS after page loads)
+# INTERVIEW API — Retrieve next interview question using conversation history
 # ===========================================================================
-@app.get("/api/interview/questions")
-async def api_interview_questions(
-    request: Request,
-    role: str,
-    level: str,
-    count: int = 5,
-    db: Session = Depends(get_db)
-):
+@app.post("/api/interview/next_question")
+async def api_interview_next_question(request: Request, db: Session = Depends(get_db)):
 
     user = get_current_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
 
+    body = await request.json()
+
+    user_id = body.get("user_id")
+    history = body.get("history", [])
+
+    # -----------------------------
+    # VALIDATION
+    # -----------------------------
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="Missing user_id")
+
+    if str(user_id) != str(user.id) and str(user_id) != str(user.username):
+        raise HTTPException(status_code=403, detail="Invalid user_id")
+
+    if not isinstance(history, list):
+        raise HTTPException(status_code=400, detail="history must be a list")
+
+    # -----------------------------
+    # EXTRACT MEMORY FROM HISTORY
+    # -----------------------------
+    previous_questions = [
+        h.get("question", "").strip()
+        for h in history
+        if isinstance(h, dict) and h.get("question")
+    ]
+
+    # -----------------------------
+    # SESSION SETUP
+    # -----------------------------
+    session = interview_sessions.get(user.username)
+
+    if session is None:
+        interview_sessions[user.username] = {
+            "role": body.get("role", "Software Engineer"),
+            "level": body.get("level", "Junior"),
+            "questions": [],
+            "answers": [],
+            "categories": []
+        }
+        session = interview_sessions[user.username]
+
+    # Ensure categories always exist
+    if "categories" not in session:
+        session["categories"] = []
+
+    used_categories = session.get("categories", [])
+
+    # -----------------------------
+    # CONTEXT
+    # -----------------------------
+    role = session.get("role", body.get("role", "Software Engineer"))
+    level = session.get("level", body.get("level", "Junior"))
     resume_text = resume_store.get(user.username, "")
+    completed_modules = session.get("completed_modules", [])
+    course_topics = session.get("course_topics", [])
 
-    if resume_text:
-        prompt = interview_questions_with_resume_prompt(role, level, resume_text, count)
-    else:
-        prompt = interview_questions_prompt(role, level, count)
+    # -----------------------------
+    # LLM CALL (FIXED INPUT)
+    # -----------------------------
+    result = await question_chain.invoke(
+        {
+            "role": role,
+            "level": level,
+            "resume_text": resume_text,
+            "completed_modules": completed_modules,
+            "course_topics": course_topics,
+            "previous_questions": previous_questions,
+            "used_categories": used_categories
+        }
+    )
 
-    raw = await generate_content(prompt, use_cache=False, json_mode=True)
+    if result.status != "success":
+        raise HTTPException(status_code=500, detail="Failed to generate next interview question")
 
-    raw = raw.strip()
+    # -----------------------------
+    # PARSE RESPONSE SAFELY
+    # -----------------------------
+    try:
+        parsed = extract_json(result.output)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse LLM response: {str(e)}")
 
-    print(f"[questions] Raw response length: {len(raw) if raw else 0}")
-    if raw:
-        print(f"[questions] Raw preview: {raw[:300]}")
+    if not isinstance(parsed, dict) or "question" not in parsed:
+        raise HTTPException(status_code=500, detail="Invalid question response format")
 
-    # Fix truncated JSON arrays
-    if raw.startswith("[") and not raw.endswith("]"):
-        raw += "]"
+    # -----------------------------
+    # UPDATE SESSION STATE
+    # -----------------------------
+    if "category" in parsed and parsed["category"]:
+        session["categories"].append(parsed["category"])
 
-    questions = []
+    session["questions"].append(parsed.get("question", ""))
 
-    if not raw:
-        print("[questions] Empty AI response — using fallback")
-
-    else:
-        try:
-            questions_data = extract_json(raw)
-            print(f"[questions] Extracted type: {type(questions_data).__name__}")
-
-            if isinstance(questions_data, list):
-                questions = questions_data
-
-            elif isinstance(questions_data, dict):
-
-                if "questions" in questions_data:
-                    questions = questions_data["questions"]
-
-                elif "question" in questions_data:
-                    questions = questions_data["question"]
-
-                else:
-                    for key in questions_data:
-                        if isinstance(questions_data[key], list):
-                            questions = questions_data[key]
-                            break
-
-            cleaned_questions = []
-
-            if isinstance(questions, list):
-
-                for q in questions:
-
-                    if isinstance(q, str):
-                        cleaned_questions.append(q)
-
-                    elif isinstance(q, dict):
-
-                        if "question" in q:
-                            cleaned_questions.append(str(q["question"]))
-
-                        elif "text" in q:
-                            cleaned_questions.append(str(q["text"]))
-
-            questions = cleaned_questions[:count]
-
-            print(f"[questions] Extracted {len(questions)} questions")
-
-        except Exception as e:
-
-            print(f"[questions] JSON extraction failed: {e}")
-
-            matches = re.findall(r'"question"\s*:\s*"([^"]+)"', raw)
-
-            if matches:
-                questions = matches[:count]
-                print(f"[questions] Extracted {len(questions)} questions using regex fallback")
-
-            else:
-                questions = [
-                    line.strip().lstrip("0123456789.)- ")
-                    for line in raw.split("\n")
-                    if line.strip().endswith("?")
-                ][:count]
-
-    if not questions:
-        questions = [
-            "Tell me about yourself and your relevant experience.",
-            "What is your greatest professional achievement?",
-            "How do you handle tight deadlines?",
-            "Describe a challenging problem you solved recently.",
-            "Where do you see yourself in five years?",
-        ][:count]
-
-    interview_sessions[user.username] = {
-        "role": role,
-        "level": level,
-        "questions": questions,
-        "answers": [],
-    }
-
-    return {"questions": questions}
+    # -----------------------------
+    # RETURN RESPONSE
+    # -----------------------------
+    return JSONResponse(content=parsed)
 
 # ===========================================================================
 # INTERVIEW API — Batch evaluate all answers after interview ends
@@ -907,14 +1274,35 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
             )
             record_interview_result(profile_obj, rec)
 
-        # Sync weak topics from LLM result
+        # Sync weak topics from LLM result - handle both dict and list
         weak_from_llm = []
-        for topics in content_result.get("weak_topics", {}).values():
-            weak_from_llm.extend(topics)
+        weak_topics_raw = content_result.get("weak_topics", [])
+        if isinstance(weak_topics_raw, dict):
+            for topics in weak_topics_raw.values():
+                if isinstance(topics, list):
+                    weak_from_llm.extend(topics)
+                else:
+                    weak_from_llm.append(str(topics) if topics else "")
+        elif isinstance(weak_topics_raw, list):
+            weak_from_llm.extend(weak_topics_raw)
+        
+        # Safe access to weak_topics with fallback
+        profile_weak_topics = getattr(profile_obj, 'weak_topics', [])
+        if not isinstance(profile_weak_topics, list):
+            profile_weak_topics = []
+        
         for w in weak_from_llm:
-            w_norm = w.strip().lower()
-            if w_norm and w_norm not in {t.lower() for t in profile_obj.weak_topics}:
-                profile_obj.weak_topics.append(w)
+            if not w:
+                continue
+            w_str = str(w).strip() if w else ""
+            if not w_str:
+                continue
+            w_norm = w_str.lower()
+            if w_norm not in {t.lower() for t in profile_weak_topics if t}:
+                profile_weak_topics.append(w_str)
+        
+        # Update profile with clean weak_topics list
+        profile_obj.weak_topics = profile_weak_topics
 
         # Recompute weaknesses & recommend micro-courses
         detect_weaknesses(profile_obj)
@@ -959,21 +1347,23 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
 
         # Aggregate simple fields for quick display in profile page
         skills_list = []
+        avg_score = overall
 
         if hasattr(profile_obj, "skill_graph") and profile_obj.skill_graph:
-              skills_list = [node.skill_name for node in profile_obj.skill_graph.values()]
-        if profile_obj.skill_graph:
-            avg_score = sum(n.score for n in profile_obj.skill_graph.values()) / len(
-                profile_obj.skill_graph
-            )
-        else:
-            avg_score = overall
+            try:
+                skills_list = [node.skill_name for node in profile_obj.skill_graph.values() if hasattr(node, 'skill_name')]
+                if profile_obj.skill_graph:
+                    scores = [n.score for n in profile_obj.skill_graph.values() if hasattr(n, 'score')]
+                    if scores:
+                        avg_score = sum(scores) / len(scores)
+            except Exception:
+                pass
 
         profile_row.role_applied_for = role
         profile_row.current_designation = level
         profile_row.extracted_skills = json.dumps(skills_list)
         profile_row.skill_strength_percentage = float(profile_obj.overall_score)
-        profile_row.skill_gaps = json.dumps(profile_obj.weak_topics)
+        profile_row.skill_gaps = json.dumps(getattr(profile_obj, 'weak_topics', []))
         # Use performance summary as latest improvement suggestions snapshot
         profile_row.improvement_suggestions = report.get("performance_summary", "")
         profile_row.profile_json = profile_obj.json()
@@ -1040,19 +1430,9 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         session = interview_sessions.get(user.username, {})
         session["answers"] = answers
 
-        # Generate batch evaluation
-        prompt = batch_evaluation_prompt(role, answers)
-        raw = await generate_content(prompt, use_cache=False, json_mode=True)
+        evaluation = await evaluate_answers(role, answers)
 
-        print(f"[evaluate] raw AI response length: {len(raw)}")
-        print(f"[evaluate] raw AI response (first 500 chars): {raw[:500]}")
-
-        evaluation = None
-        try:
-            evaluation = extract_json(raw)
-            print(f"[evaluate] parsed JSON keys: {list(evaluation.keys()) if isinstance(evaluation, dict) else type(evaluation)}")
-        except Exception as exc:
-            print(f"[evaluate] JSON parse error: {exc}")
+        print(f"[evaluate] batch evaluation result keys: {list(evaluation.keys()) if isinstance(evaluation, dict) else type(evaluation)}")
 
         # Normalize top-level keys (AI may use variant names)
         if isinstance(evaluation, dict):
@@ -1350,96 +1730,848 @@ def interview_history_redirect(request: Request):
     return RedirectResponse("/profile")
 
 
-@app.post("/generate_course/", response_class=HTMLResponse)
-def generate_course_page(
+# Deprecated: replaced by DB-based course system
+# @app.get("/api/course/stream")
+# async def api_course_stream(request: Request, role: str, level: str, db: Session = Depends(get_db)):
+#     user = get_current_user(request, db)
+#     if not user:
+#         raise HTTPException(status_code=401, detail="Not logged in")
+#
+#     course = Course(
+#         user_id=user.id,
+#         role=role,
+#         title=f"{level.title()} {role} Course",
+#         description="",
+#         level=level,
+#         status="draft"
+#     )
+#     db.add(course)
+#     db.flush()
+#
+#     async def event_generator():
+#         import asyncio
+#
+#         # Heartbeat
+#         yield {"event": "heartbeat", "data": "connected"}
+#
+#         # =========================
+#         # STAGE 1: OUTLINE
+#         # =========================
+#         yield {"event": "status", "data": "Generating course outline..."}
+#
+#         await asyncio.sleep(0.5)
+#
+#         outline_prompt_input = {
+#             "skill": role,
+#             "level": level,
+#             "duration_hours": 20
+#         }
+#
+#         # ===== OUTLINE =====
+#         outline_prompt = prompt_manager.get_prompt("course_outline", **outline_prompt_input)
+#         outline_text = await llm_service.invoke(outline_prompt)
+#
+#         try:
+#             outline_json = extract_json(outline_text)
+#         except:
+#             match = re.search(r"\{.*\}", outline_text, re.DOTALL)
+#             if match:
+#                 outline_json = json.loads(match.group(0))
+#             else:
+#                 raise ValueError("Invalid outline JSON")
+#
+#         course.title = outline_json.get("course_title", course.title)
+#         course.description = outline_json.get("description", "")
+#         db.commit()
+#
+#         # Normalize modules and persist skeletons
+#         modules = []
+#         module_records = []
+#         for idx, mod in enumerate(outline_json.get("modules", [])):
+#             title = mod.get("module_title") or mod.get("title")
+#             description = ", ".join(mod.get("topics", [])) if mod.get("topics") else mod.get("description", "")
+#
+#             module_record = Module(
+#                 course_id=course.id,
+#                 title=title,
+#                 description=description,
+#                 order_index=idx,
+#                 is_unlocked=(idx == 0)
+#             )
+#             db.add(module_record)
+#             db.flush()
+#             module_records.append(module_record)
+#
+#             modules.append({
+#                 "id": module_record.id,
+#                 "title": title,
+#                 "description": description
+#             })
+#
+#         db.commit()
+#
+#         # Send outline
+#         yield {
+#             "event": "outline",
+#             "data": json.dumps({
+#                 "course_title": outline_json.get("course_title"),
+#                 "description": outline_json.get("description"),
+#                 "modules": modules
+#             })
+#         }
+#
+#         # =========================
+#         # STAGE 2: MODULES (Deep Dive)
+#         # =========================
+#         for i, mod in enumerate(modules):
+#             if await request.is_disconnected():
+#                 return
+#
+#             yield {
+#                 "event": "status",
+#                 "data": f"Generating module {i+1}/{len(modules)}..."
+#             }
+#
+#             module_prompt_input = {
+#                 "skill": role,
+#                 "module": mod["title"],
+#                 "level": level
+#             }
+#
+#             # ===== MODULE =====
+#             module_prompt = prompt_manager.get_prompt("course_module_detail", **module_prompt_input)
+#             module_text = await llm_service.invoke(module_prompt)
+#
+#             try:
+#                 module_json = json.loads(module_text)
+#             except:
+#                 match = re.search(r"\{.*\}", module_text, re.DOTALL)
+#                 if match:
+#                     module_json = json.loads(match.group(0))
+#                 else:
+#                     raise ValueError("Invalid module JSON")
+#
+#             # Safety check
+#             if len(module_json.get("quiz", [])) != 3:
+#                 module_json["quiz"] = []
+#
+#             module_record = module_records[i]
+#             module_record.content = module_json.get("content_markdown", "")
+#             module_record.quiz = module_json.get("quiz", [])
+#             db.commit()
+#
+#             yield {
+#                 "event": "module_detail",
+#                 "data": json.dumps({
+#                     "module_id": module_record.id,
+#                     "index": i,
+#                     "module_title": module_json.get("module_title", module_record.title),
+#                     "content_markdown": module_record.content,
+#                     "quiz": module_record.quiz,
+#                     "external_practice_tasks": module_json.get("external_practice_tasks", [])
+#                 })
+#             }
+#
+#         # =========================
+#         # DONE
+#         # =========================
+#         yield {"event": "done", "data": "Course generation complete!"}
+#
+#     return EventSourceResponse(event_generator())
+# ===========================================================================
+# SKELETON-FIRST COURSE GENERATION SYSTEM (NEW ARCHITECTURE)
+# ===========================================================================
+
+@app.post("/api/course/create")
+async def create_course(
     request: Request,
     role: str = Form(...),
     level: str = Form(...),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db)
 ):
+    """
+    Create course skeleton (outline only, no module content yet).
+    
+    - Generate outline using PromptManager
+    - Create Course record
+    - Create Module records (title + description only)
+    - Unlock first module
+    - Return course_id and modules list
+    """
     user = get_current_user(request, db)
     if not user:
-        return RedirectResponse("/login")
+        raise HTTPException(status_code=401, detail="Not logged in")
+    
+    try:
+        # Generate outline using LLM
+        outline_prompt_input = {
+            "skill": role,
+            "level": level,
+            "duration_hours": 20
+        }
+        
+        # ===== OUTLINE =====
+        outline_prompt = prompt_manager.get_prompt("course_outline", **outline_prompt_input)
+        outline_text = await llm_service.invoke(outline_prompt)
+        
+        # Parse LLM response (extract JSON)
+        try:
+            outline_json = extract_json(outline_text)
+
+        except Exception as e:
+            print("OUTLINE PARSE FAILED")
+            print("ERROR:", str(e))
+            print("RAW OUTPUT:\n", outline_text[:1000])
+
+            match = re.search(r"\{.*\}", outline_text, re.DOTALL)
+
+            if match:
+                try:
+                   outline_json = json.loads(match.group(0))
+                except Exception:
+                    raise HTTPException(status_code=500, detail="Invalid outline JSON format")
+            else:
+                raise HTTPException(status_code=500, detail="No JSON found in outline response")
+        
+        # Create Course record
+        course = Course(
+            user_id=user.id,
+            role=role,
+            title=outline_json.get("course_title", f"{level.title()} {role} Course"),
+            description=outline_json.get("description", ""),
+            level=level,
+            status="generated"
+        )
+        db.add(course)
+        db.flush()  # Get course.id
+        
+        # Create Module records (skeleton only, no content yet)
+        modules_data = []
+        outline_modules = outline_json.get("modules", [])
+        total_modules = len(outline_modules)
+
+        for idx, mod_data in enumerate(outline_modules):
+            title = mod_data.get("module_title") or mod_data.get("title") or f"Module {idx+1}"
+            description = ", ".join(mod_data.get("topics", [])) if mod_data.get("topics") else mod_data.get("description", "")
+            is_final_module = idx == total_modules - 1
+
+            module = Module(
+                course_id=course.id,
+                title=title,
+                description=description,
+                order_index=idx,
+                is_unlocked=(idx == 0),
+                is_final=is_final_module
+            )
+
+            db.add(module)
+            db.flush()
+
+            modules_data.append({
+                "id": module.id,
+                "title": module.title,
+                "description": module.description,
+                "order_index": module.order_index,
+                "is_unlocked": module.is_unlocked,
+                "is_completed": module.is_completed,
+                "is_final": module.is_final
+            })
+
+        # Ensure minimum 5 modules
+        if total_modules < 5:
+            for i in range(total_modules, 5):
+                title = f"Additional Module {i+1}"
+                description = "Extra learning module"
+                is_final_module = i == 4
+
+                module = Module(
+                    course_id=course.id,
+                    title=title,
+                    description=description,
+                    order_index=i,
+                    is_unlocked=(i == 0 and total_modules == 0),
+                    is_final=is_final_module
+                )
+
+                db.add(module)
+                db.flush()
+
+                modules_data.append({
+                    "id": module.id,
+                    "title": module.title,
+                    "description": module.description,
+                    "order_index": module.order_index,
+                    "is_unlocked": module.is_unlocked,
+                    "is_completed": module.is_completed,
+                    "is_final": module.is_final
+                })
+
+        # ✅ COMMIT AFTER LOOP
+        db.commit()
+
+        # ✅ RETURN AFTER LOOP
+        return RedirectResponse(url=f"/course/{course.id}", status_code=303)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Course creation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create course")
+
+
+@app.get("/course/{course_id}", response_class=HTMLResponse)
+def course_page(request: Request, course_id: int, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if course.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    modules = (
+        db.query(Module)
+        .filter(Module.course_id == course.id)
+        .order_by(Module.order_index.asc())
+        .all()
+    )
 
     return templates.TemplateResponse(
         "course.html",
         {
             "request": request,
             "username": user.username,
-            "role": role,
-            "level": level,
+            "course": course,
+            "modules": modules,
         },
     )
 
-@app.get("/api/course/stream")
-async def api_course_stream(request: Request, role: str, level: str, db: Session = Depends(get_db)):
-    """Server-Sent Events endpoint for staged course generation."""
+
+@app.get("/module/{module_id}", response_class=HTMLResponse)
+def module_page(request: Request, module_id: int, db: Session = Depends(get_db)):
     user = get_current_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
 
-    async def event_generator():
-        # Stage 1: Outline
-        yield {"event": "status", "data": "Generating course outline..."}
+    module = db.query(Module).filter(Module.id == module_id).first()
+    if not module:
+        raise HTTPException(status_code=404, detail="Module not found")
 
-        outline_raw = await generate_content(course_outline_prompt(role, level), json_mode=True)
-        outline = None
-        try:
-            outline = extract_json(outline_raw)
-        except Exception as exc:
-            print(f"[course] outline parse error: {exc}")
+    course = db.query(Course).filter(Course.id == module.course_id).first()
+    if not course or course.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
 
-        if not isinstance(outline, dict) or not outline.get("modules"):
-            outline = {
-                "course_title": f"{level.title()} {role.title()} Course",
-                "course_description": f"A comprehensive course for {level} {role} professionals.",
-                "modules": [
-                    {"title": f"{role.title()} Fundamentals", "description": f"Core foundational concepts for {role}."},
-                    {"title": f"Intermediate {role.title()} Skills", "description": f"Building on the basics for {role}."},
-                    {"title": f"Advanced {role.title()} Topics", "description": f"Deep-dive into complex {role} areas."},
-                    {"title": f"{role.title()} Projects & Practice", "description": f"Hands-on application for {role}."},
-                ],
-            }
+    if not module.is_unlocked:
+        raise HTTPException(status_code=403, detail="Module not unlocked yet")
 
-        # Normalize: the prompt asks for course_title/course_description
-        # but the frontend also accepts title/description
-        outline.setdefault("title", outline.get("course_title", ""))
-        outline.setdefault("description", outline.get("course_description", ""))
+    return templates.TemplateResponse(
+        "module.html",
+        {
+            "request": request,
+            "username": user.username,
+            "module_id": module.id,
+            "module_title": module.title,
+            "course_id": course.id,
+            "role": course.role,
+            "level": course.level,
+            "is_final": module.is_final,
+        },
+    )
 
-        yield {"event": "outline", "data": json.dumps(outline)}
+@app.get("/api/module/{module_id}")
+async def get_module(module_id: int, request: Request, db: Session = Depends(get_db)):
 
-        # Stage 2 & 3: Module details (one at a time)
-        modules = outline.get("modules", [])
-        for i, mod in enumerate(modules):
-            if await request.is_disconnected():
-                return
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
 
-            yield {"event": "status", "data": f"Generating module {i + 1}/{len(modules)}: {mod['title']}..."}
+    module = db.query(Module).filter(Module.id == module_id).first()
 
-            detail_raw = await generate_content(
-                course_module_detail_prompt(role, level, mod["title"]),
-                json_mode=True,
-            )
-            detail = None
+    if not module:
+        raise HTTPException(status_code=404, detail="Module not found")
+
+    def _extract_practice_links(content_text: str):
+        marker_start = "<!-- MODULE_PRACTICE_LINKS_START"
+        marker_end = "MODULE_PRACTICE_LINKS_END -->"
+        if marker_start in content_text and marker_end in content_text:
             try:
-                detail = extract_json(detail_raw)
-            except Exception as exc:
-                print(f"[course] module {i} parse error: {exc}")
+                payload = content_text.split(marker_start, 1)[1].split(marker_end, 1)[0].strip()
+                parsed = json.loads(payload)
+                links = parsed.get("practice_links", []) if isinstance(parsed, dict) else []
+                clean_content = content_text.split(marker_start, 1)[0].strip()
+                return clean_content, links
+            except Exception:
+                return content_text, []
+        return content_text, []
 
-            if not isinstance(detail, dict) or "module_title" not in detail:
-                detail = {
-                    "module_title": mod["title"],
-                    "overview": detail_raw[:500] if detail_raw else "Content generation in progress.",
-                    "concepts": [],
-                    "lessons": [],
-                    "exercises": [],
-                    "quiz": [],
-                    "project": None,
-                    "resources": [],
-                }
+    # Check if module is unlocked
+    if not module.is_unlocked:
+        raise HTTPException(status_code=403, detail="Module locked")
 
-            yield {"event": "module_detail", "data": json.dumps({"index": i, **detail})}
+    # ✅ RETURN CACHED CONTENT
+    if module.content:
+        logger.info(f"Using cached content for module {module_id} by user {user.id}")
+        content_text, cached_links = _extract_practice_links(module.content)
+        return {
+            "module_id": module.id,
+            "module_title": module.title,
+            "content_markdown": content_text,
+            "quiz": module.quiz if isinstance(module.quiz, list) else [],
+            "practice_links": cached_links,
+        }
 
-        yield {"event": "done", "data": "Course generation complete!"}
+    course = db.query(Course).filter(Course.id == module.course_id).first()
 
-    return EventSourceResponse(event_generator())
+    logger.info(f"Generating content for module {module_id} by user {user.id}")
+
+    prompt = prompt_manager.get_prompt(
+        "course_module_detail",
+        skill=course.role,
+        module=module.title,
+        level=course.level,
+        is_final=module.is_final,
+        previous_modules=""
+    )
+
+    raw = await llm_service.invoke(prompt)
+
+    try:
+        module_json = extract_json(raw)
+    except Exception as e:
+        logger.error(f"Module parse error for {module_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to parse module content from LLM"
+        )
+
+    raw_content = module_json.get("content_markdown", "") or "Detailed module content could not be retrieved. Please refresh the module."
+    raw_content, _ = _extract_practice_links(raw_content)
+    module.content = raw_content
+    quiz_data = module_json.get("quiz", [])
+    if isinstance(quiz_data, list) and len(quiz_data) == 3:
+        valid = True
+        for q in quiz_data:
+            if not isinstance(q, dict):
+                valid = False
+                break
+            options = q.get("options", [])
+            answer = (q.get("answer") or "").upper()
+            if not isinstance(options, list) or len(options) != 4 or answer not in ["A", "B", "C", "D"]:
+                valid = False
+                break
+        if not valid:
+            quiz_data = []
+    else:
+        quiz_data = []
+    module.quiz = quiz_data
+
+    practice_links = module_json.get("practice_links", [])
+    if not isinstance(practice_links, list):
+        practice_links = []
+
+    validated_links = []
+    for item in practice_links:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        url = item.get("url")
+        if isinstance(title, str) and title and isinstance(url, str) and url.startswith("http"):
+            validated_links.append({"title": title, "url": url})
+
+    if not validated_links:
+        external_links = module_json.get("external_practice_tasks", [])
+        if isinstance(external_links, list):
+            for item in external_links:
+                if not isinstance(item, dict):
+                    continue
+                title = item.get("title")
+                url = item.get("url")
+                if isinstance(title, str) and title and isinstance(url, str) and url.startswith("http"):
+                    validated_links.append({"title": title, "url": url})
+
+    if len(validated_links) > 4:
+        validated_links = validated_links[:4]
+
+    if len(validated_links) < 2:
+        validated_links = []
+
+    if validated_links:
+        marker = f"\n\n<!-- MODULE_PRACTICE_LINKS_START\n{json.dumps({'practice_links': validated_links})}\nMODULE_PRACTICE_LINKS_END -->"
+        module.content = module.content.strip() + marker
+
+    db.commit()
+
+    return {
+        "module_id": module.id,
+        "module_title": module.title,
+        "content_markdown": raw_content,
+        "quiz": module.quiz,
+        "practice_links": validated_links
+    }
+
+@app.post("/api/module/{module_id}/submit")
+async def submit_quiz(
+    module_id: int,
+    request: Request,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Submit quiz answers for a module.
+    """
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    try:
+        # Fetch module
+        module = db.query(Module).filter(Module.id == module_id).first()
+        if not module:
+            raise HTTPException(status_code=404, detail="Module not found")
+
+        # Check authorization
+        course = db.query(Course).filter(Course.id == module.course_id).first()
+        if course.user_id != user.id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        # Ensure quiz is loaded
+        if not module.quiz or not isinstance(module.quiz, list) or len(module.quiz) != 3:
+            raise HTTPException(status_code=400, detail="Module has no valid quiz")
+
+        user_answers = payload.get("answers", [])
+        if not isinstance(user_answers, list) or len(user_answers) != 3:
+            raise HTTPException(status_code=400, detail="Must provide exactly 3 answers")
+
+        # Score the quiz
+        score = 0
+        for user_ans, quiz_item in zip(user_answers, module.quiz):
+            correct_ans = (quiz_item.get("answer") or "").upper()
+            if isinstance(user_ans, str) and user_ans.upper() == correct_ans:
+                score += 1
+
+        passed = score >= 2  # At least 2 out of 3 correct
+
+        # Store attempt
+        attempt = ModuleAttempt(
+            user_id=user.id,
+            module_id=module_id,
+            score=score,
+            answers=user_answers
+        )
+        db.add(attempt)
+
+        next_module_id = None
+        # Mark module as completed and unlock next module if passed
+        if passed:
+            module.is_completed = True
+            next_module = db.query(Module).filter(
+                Module.course_id == module.course_id,
+                Module.order_index == module.order_index + 1
+            ).first()
+            if next_module:
+                next_module.is_unlocked = True
+                next_module_id = next_module.id
+                logger.info(f"Unlocked next module {next_module_id} for course {course.id}")
+
+        db.commit()
+
+        logger.info(f"Quiz submitted for module {module_id} by user {user.id}, score {score}, passed {passed}")
+
+        return {
+            "score": score,
+            "passed": passed,
+            "is_final": module.is_final,
+            "next_module_id": next_module_id,
+            "role": course.role,
+            "level": course.level,
+            "course_id": course.id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Quiz submission failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Quiz submission failed: {str(e)}")
+
+
+@app.get("/api/course/{course_id}/status")
+async def get_course_status(
+    course_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Get course completion status.
+    
+    - Check if all modules completed
+    - Return: modules status, interview_unlocked flag
+    """
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    
+    try:
+        # Fetch course
+        course = db.query(Course).filter(Course.id == course_id).first()
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found")
+        
+        # Check authorization
+        if course.user_id != user.id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        # Get all modules
+        modules = db.query(Module).filter(Module.course_id == course_id).order_by(Module.order_index).all()
+        
+        module_status = []
+        all_completed = True
+        for mod in modules:
+            # Get best attempt score for this module
+            best_attempt = db.query(ModuleAttempt).filter(
+                ModuleAttempt.user_id == user.id,
+                ModuleAttempt.module_id == mod.id
+            ).order_by(ModuleAttempt.score.desc()).first()
+            
+            module_status.append({
+                "id": mod.id,
+                "title": mod.title,
+                "order_index": mod.order_index,
+                "is_unlocked": mod.is_unlocked,
+                "is_completed": mod.is_completed,
+                "best_score": best_attempt.score if best_attempt else None,
+                "best_percentage": int((best_attempt.score / best_attempt.total_questions) * 100) if best_attempt else None
+            })
+            
+            if not mod.is_completed:
+                all_completed = False
+        
+        return {
+            "course_id": course_id,
+            "title": course.title,
+            "role": course.role,
+            "level": course.level,
+            "modules": module_status,
+            "all_completed": all_completed,
+            "interview_unlocked": all_completed  # Unlock interview after all modules
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Course status check failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Course status check failed: {str(e)}")
+
+
+async def generate_final_interview(
+    user_id: int,
+    course_id: int,
+    db: Session
+) -> dict:
+    """
+    Generate a final interview session after course completion.
+    
+    Uses:
+    - Course role and level
+    - User's resume
+    - Weak topics (modules with low scores)
+    
+    Returns:
+    - interview_session_id
+    - initial questions
+    """
+    try:
+        # Fetch course and user info
+        course = db.query(Course).filter(Course.id == course_id).first()
+        if not course:
+            raise ValueError("Course not found")
+        
+        user_profile = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
+        
+        # Identify weak topics (modules with score < 70%)
+        modules = db.query(Module).filter(Module.course_id == course_id).all()
+        weak_topics = []
+        
+        for mod in modules:
+            best_attempt = db.query(ModuleAttempt).filter(
+                ModuleAttempt.user_id == user_id,
+                ModuleAttempt.module_id == mod.id
+            ).order_by(ModuleAttempt.score.desc()).first()
+            
+            if best_attempt:
+                percentage = (best_attempt.score / best_attempt.total_questions) * 100
+                if percentage < 70:
+                    weak_topics.append(mod.title)
+        
+        # Create interview session
+        session = InterviewSession(
+            user_id=user_id,
+            role=course.role,
+            level=course.level,
+            status="active"
+        )
+        db.add(session)
+        db.flush()
+        
+        # Generate initial questions using interview chain
+        resume_text = user_profile.resume_file_path if user_profile else ""
+        
+        initial_questions = await question_chain.invoke({
+            "role": course.role,
+            "level": course.level,
+            "count": 5,
+            "resume_text": resume_text,
+            "previous_questions": [],
+            "used_categories": []
+        })
+        
+        db.commit()
+        
+        return {
+            "interview_session_id": session.id,
+            "role": course.role,
+            "level": course.level,
+            "weak_topics": weak_topics,
+            "status": "started"
+        }
+    
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Final interview generation failed: {str(e)}")
+        raise
+
+
+@app.post("/api/course/{course_id}/start-interview")
+async def start_final_interview(
+    course_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Trigger final interview generation after course completion.
+    
+    - Check all modules completed
+    - Generate interview session
+    - Return session ID
+    """
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    
+    try:
+        # Verify course exists and belongs to user
+        course = db.query(Course).filter(
+            Course.id == course_id,
+            Course.user_id == user.id
+        ).first()
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found")
+        
+        # Check if all modules completed
+        modules = db.query(Module).filter(Module.course_id == course_id).all()
+        all_completed = all(mod.is_completed for mod in modules)
+        
+        if not all_completed:
+            raise HTTPException(status_code=400, detail="Not all modules completed")
+        
+        # Generate final interview
+        interview_data = await generate_final_interview(user.id, course_id, db)
+        
+        return interview_data
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Interview start failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Interview start failed: {str(e)}")
+
+
+# ===========================================================================
+# RAG MONITORING ENDPOINTS
+# ===========================================================================
+
+@app.get("/api/rag/stats")
+async def get_rag_stats():
+    """Get RAG pipeline statistics and performance metrics."""
+    
+    if rag_pipeline is None:
+        return JSONResponse(
+            {"error": "RAG pipeline not initialized"},
+            status_code=503
+        )
+    
+    try:
+        stats = rag_pipeline.get_stats()
+        return {
+            "status": "ok",
+            "initialized": stats["initialized"],
+            "documents_indexed": stats["vector_store"]["total_documents"],
+            "retrievals_performed": stats["retrieval_stats"]["retrievals_performed"],
+            "cache_hit_rate": (
+                stats["retrieval_stats"]["cache_hits"] /
+                (stats["retrieval_stats"]["cache_hits"] + stats["retrieval_stats"]["cache_misses"])
+                if (stats["retrieval_stats"]["cache_hits"] + stats["retrieval_stats"]["cache_misses"]) > 0
+                else 0
+            ),
+            "avg_retrieval_time_ms": stats["retrieval_stats"]["avg_retrieval_time"] * 1000,
+            "cache_size": stats["cache_size"],
+            "embedding_dimension": stats["vector_store"]["embedding_dimension"],
+            "document_categories": stats["ingestion_stats"]["categories"]
+        }
+    
+    except Exception as e:
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500
+        )
+
+
+@app.post("/api/rag/clear-cache")
+async def clear_rag_cache():
+    """Clear the RAG retrieval cache."""
+    
+    if rag_pipeline is None:
+        return JSONResponse(
+            {"error": "RAG pipeline not initialized"},
+            status_code=503
+        )
+    
+    try:
+        rag_pipeline.clear_cache()
+        return {"status": "ok", "message": "RAG cache cleared"}
+    
+    except Exception as e:
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500
+        )
+
+
+@app.get("/api/rag/test-retrieval")
+async def test_rag_retrieval(query: str = "Python junior level interview"):
+    """Test RAG retrieval with a sample query (for debugging)."""
+    
+    if rag_pipeline is None or not rag_pipeline.initialized:
+        return JSONResponse(
+            {"error": "RAG pipeline not initialized"},
+            status_code=503
+        )
+    
+    try:
+        from services.rag.rag_config import RetrievalContext
+        
+        context = await rag_pipeline.retrieve_context(query)
+        
+        return {
+            "status": "ok",
+            "query": query,
+            "retrieved_context": context[:500] + "..." if len(context) > 500 else context
+        }
+    
+    except Exception as e:
+        return JSONResponse(
+            {"error": str(e)},
+            status_code=500
+        )

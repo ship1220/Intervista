@@ -4,278 +4,102 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="/static/styles.css" />
-  <title>Course Generator</title>
+  <title>Course Overview</title>
 </head>
-<body>
-  <nav class="navbar">
-  <div class="nav-container">
 
+<body>
+
+<!-- NAVBAR (unchanged) -->
+<nav class="navbar">
+  <div class="nav-container">
     <h2 class="logo">
-      <img src="/static/new_logo.png" alt="Intervista AI logo" class="logo-img">
+      <img src="/static/new_logo.png" class="logo-img">
       INTERVISTA
     </h2>
 
-   <div class="nav-links">
-  <a href="/index">Home</a>
-  <a href="/#features">Features</a>
-  <a href="/#flow">How it Works</a>
-  <a href="/#contact">Contact</a>
-</div>
+    <div class="nav-links">
+      <a href="/index">Home</a>
+      <a href="/#features">Features</a>
+      <a href="/#flow">How it Works</a>
+      <a href="/#contact">Contact</a>
+    </div>
 
-      <!-- User menu -->
-      <div class="user-menu">
-        <button class="user-avatar" id="userAvatar">
-          <span class="avatar-circle">{{ username[:1] | upper }}</span>
-        </button>
+    <div class="user-menu">
+      <button class="user-avatar" id="userAvatar">
+        <span class="avatar-circle">{{ username[:1] | upper }}</span>
+      </button>
 
-        <div class="user-dropdown" id="userDropdown">
-          <div class="user-dropdown-header">
-            <div class="user-name">{{ username }}</div>
-          </div>
-
-          <a href="/profile" class="dropdown-item">View Profile</a>
-          <a href="/progress/" class="dropdown-item">Progress</a>
-          <a href="/logout" class="dropdown-item danger">Logout</a>
+      <div class="user-dropdown" id="userDropdown">
+        <div class="user-dropdown-header">
+          <div class="user-name">{{ username }}</div>
         </div>
+        <a href="/profile" class="dropdown-item">View Profile</a>
+        <a href="/progress/" class="dropdown-item">Progress</a>
+        <a href="/logout" class="dropdown-item danger">Logout</a>
       </div>
-
     </div>
   </div>
 </nav>
 
+<main>
+  <section class="card">
+    <h2>{{ course.title }}</h2>
+    <p style="color: var(--text-muted); margin-bottom: 20px;">{{ course.description }}</p>
 
-  <main>
-
-    <!-- Status bar -->
-    <section id="status-section" class="card">
-      <div class="status-indicator">
-        <div class="pulse-dot"></div>
-        <span id="status-text">Starting course generation...</span>
-      </div>
-    </section>
-
-    <!-- Outline -->
-    <section id="outline-section" class="card" style="display:none;">
-      <h2 id="course-title"></h2>
-      <p id="course-desc" style="color:var(--text-muted);margin-bottom:16px;"></p>
-      <h3>Course Outline</h3>
-      <div id="outline-list"></div>
-    </section>
-
-    <!-- Modules (populated progressively) -->
-    <div id="modules-container"></div>
-
-    <!-- Done -->
-    <section id="done-section" class="card" style="display:none;">
-      <h2>Course Generation Complete</h2>
-      <div style="margin-top:16px;display:flex;gap:12px;">
-        <a href="/index" class="btn">Back to Dashboard</a>
-        <a href="/progress" class="btn outline">View Progress</a>
-      </div>
-    </section>
-
-  </main>
-
-<script>
-(function() {
-  const ROLE  = "{{ role }}";
-  const LEVEL = "{{ level }}";
-
-  const statusText = document.getElementById('status-text');
-  const statusSection = document.getElementById('status-section');
-  const outlineSection = document.getElementById('outline-section');
-  const modulesContainer = document.getElementById('modules-container');
-  const doneSection = document.getElementById('done-section');
-
-  // Open SSE connection
-  const url = `/api/course/stream?role=${encodeURIComponent(ROLE)}&level=${encodeURIComponent(LEVEL)}`;
-  const evtSource = new EventSource(url);
-
-  evtSource.addEventListener('status', (e) => {
-    statusText.textContent = e.data;
-  });
-
-  evtSource.addEventListener('outline', (e) => {
-    try {
-      const outline = JSON.parse(e.data);
-      document.getElementById('course-title').textContent =
-        outline.title || outline.course_title || `${LEVEL} ${ROLE} Course`;
-      document.getElementById('course-desc').textContent =
-        outline.description || outline.course_description || '';
-
-      const list = document.getElementById('outline-list');
-      list.innerHTML = (outline.modules || []).map((m, i) =>
-        `<div class="outline-item">
-          <span class="outline-num">${i + 1}</span>
-          <div>
-            <strong>${escapeHtml(m.title)}</strong>
-            <p style="color:var(--text-muted);font-size:0.9rem;">${escapeHtml(m.description || '')}</p>
-          </div>
-        </div>`
-      ).join('');
-
-      outlineSection.style.display = 'block';
-      outlineSection.scrollIntoView({ behavior: 'smooth' });
-    } catch (err) {
-      console.error('outline parse error:', err);
-    }
-  });
-
-  evtSource.addEventListener('module_detail', (e) => {
-    try {
-      const d = JSON.parse(e.data);
-      const section = document.createElement('section');
-      section.className = 'card module-card fade-in';
-
-      let html = `<h3>Module ${(d.index || 0) + 1}: ${escapeHtml(d.module_title || '')}</h3>`;
-
-      // Overview
-      if (d.overview) {
-        html += `<div class="module-section">
-          <p style="color:var(--text-muted);line-height:1.6;margin-bottom:16px;">${escapeHtml(d.overview)}</p>
-        </div>`;
-      }
-
-      // Key Concepts (string list or objects — backward compatible)
-      if (d.concepts && d.concepts.length) {
-        html += `<div class="module-section">
-          <h4 class="section-label">Key Concepts</h4>
-          <div class="concepts-grid">`;
-        d.concepts.forEach(c => {
-          if (typeof c === 'string') {
-            html += `<span class="concept-tag">${escapeHtml(c)}</span>`;
-          } else if (c && c.topic) {
-            html += `<div class="lesson-item">
-              <h4>${escapeHtml(c.topic)}</h4>
-              <p>${escapeHtml(c.explanation || '')}</p>
-            </div>`;
-          }
-        });
-        html += `</div></div>`;
-      }
-
-      // Lessons (with theory and examples)
-      if (d.lessons && d.lessons.length) {
-        html += `<div class="module-section">
-          <h4 class="section-label">Lessons</h4>`;
-        d.lessons.forEach((lesson, li) => {
-          html += `<div class="lesson-item">
-            <h4>${li + 1}. ${escapeHtml(lesson.title || '')}</h4>`;
-          if (lesson.theory) {
-            html += `<p class="lesson-theory">${escapeHtml(lesson.theory)}</p>`;
-          }
-          if (lesson.content) {
-            html += `<p class="lesson-theory">${escapeHtml(lesson.content)}</p>`;
-          }
-          if (lesson.example) {
-            html += `<div class="lesson-example">
-              <strong>Example:</strong>
-              <pre>${escapeHtml(lesson.example)}</pre>
-            </div>`;
-          }
-          html += `</div>`;
-        });
-        html += `</div>`;
-      }
-
-      // Exercises
-      if (d.exercises && d.exercises.length) {
-        html += `<div class="module-section">
-          <h4 class="section-label">Exercises</h4>
-          <ol class="exercise-list">
-            ${d.exercises.map(ex => `<li>${escapeHtml(typeof ex === 'string' ? ex : ex.description || JSON.stringify(ex))}</li>`).join('')}
-          </ol>
-        </div>`;
-      }
-
-      // Quiz
-      if (d.quiz && d.quiz.length) {
-        html += `<div class="module-section">
-          <h4 class="section-label">Quiz</h4>
-          ${d.quiz.map((q, qi) => `
-            <div class="quiz-item">
-              <p class="quiz-question"><strong>${qi + 1}. ${escapeHtml(q.question || '')}</strong></p>
-              <ul class="quiz-options">
-                ${(q.options || []).map(opt => `<li>${escapeHtml(opt)}</li>`).join('')}
-              </ul>
-              <p class="quiz-answer">Answer: <span>${escapeHtml(q.answer || '')}</span></p>
+    <h3>Course Modules</h3>
+    <div id="module-list" style="display:grid; gap:16px;">
+      {% for module in modules %}
+        {% if module.is_unlocked %}
+          <a href="/module/{{ module.id }}" class="card module-link" style="text-decoration:none; color:inherit;">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:16px;">
+              <div>
+                <strong>{{ module.order_index + 1 }}. {{ module.title }}</strong>
+                {% if module.is_final %}
+                  <span class="badge" style="background:#fde68a; color:#92400e; margin-left:8px;">Final Assessment</span>
+                {% endif %}
+                <p style="color: var(--text-muted); margin:8px 0 0;">{{ module.description or 'No description available.' }}</p>
+              </div>
+              <div style="text-align:right; display:flex; flex-direction:column; gap:4px;">
+                <span class="badge" style="background:#d1fae5; color:#065f46;">Unlocked</span>
+                <span class="badge" style="background:#e0f2fe; color:#075985;">{{ 'Completed' if module.is_completed else 'Pending' }}</span>
+              </div>
             </div>
-          `).join('')}
-        </div>`;
-      }
-
-      // Project
-      if (d.project && d.project.title) {
-        html += `<div class="module-section">
-          <h4 class="section-label">Mini Project</h4>
-          <div class="lesson-item">
-            <h4>${escapeHtml(d.project.title)}</h4>
-            <p>${escapeHtml(d.project.description || '')}</p>
-            ${(d.project.skills_practiced || []).length
-              ? '<p style="margin-top:8px;"><strong>Skills practiced:</strong> ' + d.project.skills_practiced.map(s => escapeHtml(s)).join(', ') + '</p>'
-              : ''}
+          </a>
+        {% else %}
+          <div class="card module-link" style="opacity:0.7; cursor:not-allowed;">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:16px;">
+              <div>
+                <strong>{{ module.order_index + 1 }}. {{ module.title }}</strong>
+                <p style="color: var(--text-muted); margin:8px 0 0;">{{ module.description or 'Unlock this module by completing the previous one.' }}</p>
+              </div>
+              <div style="text-align:right; display:flex; flex-direction:column; gap:4px;">
+                <span class="badge" style="background:#fef3c7; color:#92400e;">Locked</span>
+                <span class="badge" style="background:#e0f2fe; color:#075985;">Pending</span>
+              </div>
+            </div>
           </div>
-        </div>`;
-      }
+        {% endif %}
+      {% endfor %}
+    </div>
 
-      // Resources
-      if (d.resources && d.resources.length) {
-        html += `<div class="module-section">
-          <h4 class="section-label">Resources</h4>
-          <ul class="resource-list">
-            ${d.resources.map(r => {
-              const link = r.link || r.url || '';
-              const title = r.title || r.name || '';
-              if (link && link.startsWith('http')) {
-                return `<li><a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(title)}</a></li>`;
-              }
-              return `<li><strong>${escapeHtml(title)}</strong>${link ? ' — ' + escapeHtml(link) : ''}</li>`;
-            }).join('')}
-          </ul>
-        </div>`;
-      }
+    <div style="margin-top:24px; display:flex; gap:12px; flex-wrap:wrap;">
+      <a href="/index" class="btn outline">Back to Dashboard</a>
+    </div>
+  </section>
+</main>
 
-      section.innerHTML = html;
-      modulesContainer.appendChild(section);
-      section.scrollIntoView({ behavior: 'smooth' });
-    } catch (err) {
-      console.error('module_detail parse error:', err);
-    }
-  });
-
-  evtSource.addEventListener('done', (e) => {
-    statusSection.style.display = 'none';
-    doneSection.style.display = 'block';
-    doneSection.scrollIntoView({ behavior: 'smooth' });
-    evtSource.close();
-  });
-
-  evtSource.onerror = () => {
-    statusText.textContent = 'Connection lost. Course generation may be incomplete.';
-    evtSource.close();
-  };
-
-  function escapeHtml(str) {
-    const d = document.createElement('div');
-    d.textContent = str;
-    return d.innerHTML;
-  }
-})();
-</script>
-
+<!-- USER MENU -->
 <script>
 const avatar = document.getElementById("userAvatar");
 const dropdown = document.getElementById("userDropdown");
 
-avatar.addEventListener("click", () => {
-  dropdown.classList.toggle("show");
-});
+avatar.onclick = () => dropdown.classList.toggle("show");
 
-window.addEventListener("click", function(e) {
+window.onclick = (e) => {
   if (!avatar.contains(e.target) && !dropdown.contains(e.target)) {
     dropdown.classList.remove("show");
   }
-});
+};
 </script>
 
 </body>

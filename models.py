@@ -135,7 +135,7 @@ class Interview(Base):
 
 
 # =========================
-# COURSE BUILDER
+# COURSE BUILDER - SKELETON-FIRST ARCHITECTURE
 # =========================
 class Course(Base):
     __tablename__ = "courses"
@@ -143,10 +143,57 @@ class Course(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
 
+    role = Column(String, nullable=False)          # e.g., "Software Engineer", "Data Scientist"
     title = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     level = Column(String, default="beginner")     # beginner/intermediate/advanced
     status = Column(String, default="draft")       # draft/generated
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Module(Base):
+    """
+    Skeleton-first modules: created with title/description, content generated on-demand.
+    
+    Supports unlock logic: first module unlocked at creation, rest unlocked on quiz completion.
+    """
+    __tablename__ = "modules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), index=True)
+
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    order_index = Column(Integer, default=0)
+
+    # Content generation (on-demand, cached)
+    content = Column(Text, nullable=True)          # JSON: markdown content
+    quiz = Column(JSON, nullable=True)             # List of quiz questions with answers
+
+    # Progress tracking
+    is_unlocked = Column(Boolean, default=False)   # User can access this module
+    is_completed = Column(Boolean, default=False)  # User passed the quiz
+    is_final = Column(Boolean, default=False)      # Final assessment module
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ModuleAttempt(Base):
+    """
+    Track user quiz attempts for each module.
+    """
+    __tablename__ = "module_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    module_id = Column(Integer, ForeignKey("modules.id"), index=True)
+
+    score = Column(Integer, default=0)             # Number of correct answers
+    total_questions = Column(Integer, default=0)   # Total quiz questions
+    answers = Column(JSON, nullable=True)          # User's answers for review
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Chapter(Base):

@@ -1,0 +1,396 @@
+# prompts/prompt_manager.py
+# Centralized prompt template management with versioning support
+
+from typing import Dict, Any, Optional
+from enum import Enum
+from utils.logger import Logger
+
+logger = Logger(__name__)
+
+
+class PromptCategory(Enum):
+    """Enum for prompt categories."""
+    INTERVIEW = "interview"
+    EVALUATION = "evaluation"
+    COURSE = "course"
+    SUMMARY = "summary"
+    PROFILE = "profile"
+    RAG_RETRIEVAL = "rag_retrieval"
+
+
+class PromptTemplate:
+    """Single prompt template with versioning."""
+    
+    def __init__(self, name: str, template: str, category: PromptCategory, version: str = "1.0"):
+        self.name = name
+        self.template = template
+        self.category = category
+        self.version = version
+    
+    def render(self, **variables) -> str:
+        """Render template with variables."""
+        try:
+            return self.template.format(**variables)
+        except KeyError as e:
+            logger.error(f"Missing template variable: {e}")
+            raise
+
+
+class PromptManager:
+    """
+    Centralized management of all prompts.
+    
+    Features:
+    - Template versioning
+    - Category organization
+    - Easy variable substitution
+    - Audit trail of prompt changes
+    """
+    
+    def __init__(self):
+        self.prompts: Dict[str, Dict[str, PromptTemplate]] = {}
+        self._register_all_prompts()
+        logger.info("PromptManager initialized with all templates")
+    
+    def _register_all_prompts(self):
+        """Register all prompt templates."""
+        
+        # INTERVIEW PROMPTS
+        self._register_agentic_interviewer()
+        
+        # EVALUATION PROMPTS
+        self._register_evaluation_content()
+        self._register_performance_summary()
+        
+        # COURSE PROMPTS
+        self._register_course_outline()
+        self._register_course_module_detail()
+        
+        # PROFILE PROMPTS
+        self._register_resume_skill_profile()
+        
+        # RAG PROMPTS
+        self._register_rag_retrieval()
+    
+    def _register_agentic_interviewer(self):
+        """Agentic interviewer system prompt for resume-aware multi-turn interviews."""
+        template = """You are an elite technical recruiter and interviewer.
+
+Analyze the role, designation, resume, and learning context:
+Role: {role}
+Designation: {level}
+Resume context: {resume_text}
+Completed module titles: {completed_modules}
+Course topics: {course_topics}
+Previous questions asked:
+{previous_questions}
+
+Avoid repeating any of the above questions.
+
+Used categories so far:
+{used_categories}
+
+Ask a NEW question from a DIFFERENT category if possible.
+Prioritize weak areas, course topics, and role-specific applied scenarios.
+
+Rules:
+- NEVER repeat previous questions
+- ALWAYS generate a unique, fresh question
+- If repeating category, increase difficulty or depth
+- Use course topics and completed modules to make questions relevant and practical
+
+Return ONLY JSON:
+{{
+ "question": "...",
+ "category": "behavioral|situational|technical|logical|project-specific"
+}}
+"""
+        
+        self._register(
+            "interviewer_system_prompt",
+            template,
+            PromptCategory.INTERVIEW,
+            "3.0"
+        )
+    
+    def _register_evaluation_content(self):
+        """Evaluate interview answer."""
+        template = """You are evaluating an interview answer for a {level} {role} candidate.
+
+IMPORTANT: Answers come from speech transcription. Ignore grammar errors.
+
+Scoring rules:
+- 0 → Question skipped or empty answer
+- 10-20 → Completely incorrect answer
+- 50-70 → Conceptually correct but poorly structured
+- 80-90 → Correct, clear explanation  
+- 90-100 → Excellent with strong understanding
+
+Question (first 120 chars):
+{question}
+
+Candidate Answer (first 1500 chars):
+{answer}
+
+Return ONLY valid JSON with no markdown:
+{{
+ "score": <number 0-100>,
+ "strengths": ["strength1", "strength2"],
+ "weaknesses": ["weakness1", "weakness2"],
+ "ideal_answer": "short example ideal answer on how the user should've answered (max 5 sentences)",
+ "weak_topics": ["topic1", "topic2"]
+}}
+
+STRICT: Return ONLY valid JSON. No extra text. No explanation. Output must start with {{ and end with }}."""
+        
+        self._register(
+            "evaluate_answer",
+            template,
+            PromptCategory.EVALUATION,
+            "2.0"
+        )
+    
+    def _register_performance_summary(self):
+        """Generate performance summary."""
+        template = """You are a technical recruiter evaluating interview performance.
+
+Candidate Role: {role}
+Overall Score: {score}/100
+
+Top Weak Topics: {weak_topics}
+
+Attempted Questions: {attempted}/5
+
+Write a brief professional summary (3-4 sentences) recommending:
+1. Key strength areas
+2. Priority improvement areas
+
+Be concise and actionable.
+
+STRICT: Return ONLY the summary text. No JSON, no markdown, no extra text."""
+        
+        self._register(
+            "performance_summary",
+            template,
+            PromptCategory.SUMMARY,
+            "1.0"
+        )
+    
+    def _register_course_outline(self):
+        """Generate course outline."""
+        template = """You are a senior curriculum designer.
+
+Create a structured course outline for: {skill}
+Target Level: {level}
+Duration: {duration_hours} hours
+
+Return JSON:
+
+{{
+ "course_title": "...",
+ "description": "...",
+ "learning_objectives": ["..."],
+ "modules": [
+  {{
+   "module_title": "...",
+   "duration_minutes": 60,
+   "topics": ["..."]
+  }}
+ ],
+ "assessments": ["..."]
+}}"""
+        
+        self._register(
+            "course_outline",
+            template,
+            PromptCategory.COURSE,
+            "1.0"
+        )
+    
+    def _register_course_module_detail(self):
+        """Generate detailed course module with strict JSON output."""
+        template = """You are a technical instructor creating detailed learning content.
+
+Create comprehensive content for:
+Skill: {skill}
+Module: {module}
+Level: {level}
+Final module: {is_final}
+Previous modules: {previous_modules}
+
+Audience level guidance:
+- Intern: skip beginner-level basics and start at intermediate applied concepts.
+- Junior: deliver intermediate content plus applied problems and real examples.
+- Senior: provide advanced concepts, system-level thinking, and architectural tradeoffs.
+
+STRICT CONTENT REQUIREMENTS:
+1. Depth over definition: Avoid generic definitions and beginner-level explanations.
+   - Provide real-world explanation, practical use cases, edge cases, and best practices.
+   - Include at least one meaningful code example that solves a real problem.
+   - Include one real-world scenario or case study.
+
+2. Practical Learning Depth: The 'content_markdown' must be at least 5-6 paragraphs with detailed technical explanations.
+   - Use clear headings, step-by-step reasoning, and concrete examples.
+   - Avoid shallow descriptions and list-style content.
+
+3. Practice Links: Add a mandatory field "practice_links".
+   - It must be a list of 2-4 valid resources.
+   - Each item must include "title" and "url".
+   - URLs must start with http.
+   - Prefer real resources from LeetCode, GeeksforGeeks, HackerRank, or other trusted technical learning sites.
+
+4. Active Recall Quiz: Ensure quiz questions focus on application and problem solving.
+5. Quiz must have EXACTLY 3 multiple-choice questions.
+6. Each question has 4 options and 1 correct answer.
+7. Answer field contains the LETTER of the correct option (A, B, C, or D).
+
+Return ONLY valid JSON (no markdown wrapper, no extra text):
+
+{{
+ "module_title": "Actual module title here",
+ "content_markdown": "Write full markdown explanation with headings, paragraphs and code block",
+ "quiz": [
+  {{
+   "question": "Application-focused question here",
+   "options": ["Option A", "Option B", "Option C", "Option D"],
+   "answer": "A"
+  }},
+  {{
+   "question": "Application-focused question here",
+   "options": ["Option A", "Option B", "Option C", "Option D"],
+   "answer": "B"
+  }},
+  {{
+   "question": "Application-focused question here",
+   "options": ["Option A", "Option B", "Option C", "Option D"],
+   "answer": "C"
+  }}
+ ],
+ "practice_links": [
+  {{
+   "title": "LeetCode problem title",
+   "url": "https://leetcode.com/problems/example"
+  }}
+ ]
+}}
+
+CRITICAL: Return ONLY the JSON object. No markdown code blocks. No explanations."""
+        
+        self._register(
+            "course_module_detail",
+            template,
+            PromptCategory.COURSE,
+            "2.0"
+        )
+    
+    def _register_resume_skill_profile(self):
+        """Extract skills from resume."""
+        template = """You are analyzing a professional resume.
+
+Target Role: {role}
+Experience Level: {experience_level}
+
+Resume (first 800 chars):
+{resume_text}
+
+Extract and analyze. Return ONLY JSON:
+
+{{
+ "identified_skills": ["..."],
+ "skill_gaps": ["..."],
+ "missing_for_role": ["..."],
+ "strength_percentage": <0-100>,
+ "improvement_suggestions": "short paragraph"
+}}"""
+        
+        self._register(
+            "resume_skill_profile",
+            template,
+            PromptCategory.PROFILE,
+            "2.0"
+        )
+    
+    def _register_rag_retrieval(self):
+        """RAG retrieval relevance check."""
+        template = """Given the following documents, determine if they contain relevant information to answer the user's question.
+
+User Question:
+{question}
+
+Available Documents:
+{documents}
+
+Return JSON:
+
+{{
+ "relevant": <true/false>,
+ "relevance_score": <0-100>,
+ "relevant_sections": ["section1", "section2"],
+ "reasoning": "brief explanation"
+}}"""
+        
+        self._register(
+            "rag_retrieval",
+            template,
+            PromptCategory.RAG_RETRIEVAL,
+            "1.0"
+        )
+    
+    def _register(self, name: str, template: str, category: PromptCategory, version: str):
+        """Register a new prompt template."""
+        if category.value not in self.prompts:
+            self.prompts[category.value] = {}
+        
+        self.prompts[category.value][name] = PromptTemplate(
+            name=name,
+            template=template,
+            category=category,
+            version=version
+        )
+        logger.debug(f"Registered prompt: {category.value}/{name} v{version}")
+    
+    def get_prompt(self, name: str, category: PromptCategory = None, **variables) -> str:
+        """
+        Get and render prompt template.
+        
+        Args:
+            name: Prompt name
+            category: Prompt category (optional, for disambiguation)
+            **variables: Template variables
+        
+        Returns:
+            Rendered prompt string
+        """
+        
+        # Search across all categories if not specified
+        for cat_name, cat_prompts in self.prompts.items():
+            if name in cat_prompts:
+                prompt = cat_prompts[name]
+                rendered = prompt.render(**variables)
+                logger.debug(f"Retrieved prompt: {name} (v{prompt.version})")
+                return rendered
+        
+        logger.error(f"Prompt not found: {name}")
+        raise ValueError(f"Prompt template '{name}' not found")
+    
+    def list_prompts(self, category: PromptCategory = None) -> Dict[str, str]:
+        """List all registered prompts with versions."""
+        result = {}
+        
+        for cat_name, cat_prompts in self.prompts.items():
+            if category and cat_name != category.value:
+                continue
+            
+            for name, prompt in cat_prompts.items():
+                result[f"{cat_name}/{name}"] = prompt.version
+        
+        return result
+    
+    def get_template_preview(self, name: str, max_chars: int = 200) -> str:
+        """Get preview of template (first N chars)."""
+        for cat_prompts in self.prompts.values():
+            if name in cat_prompts:
+                template = cat_prompts[name].template
+                return template[:max_chars] + "..." if len(template) > max_chars else template
+        
+        return "Template not found"
