@@ -59,10 +59,8 @@ from speech.transcription import (
 from utils.rl_helpers import (
     get_state_id,
     calculate_reward,
-    normalize_final_score,
-    log_rl_metrics,
 )
-from services.rl.rl_service import TabularQLearner, INTERVIEW_ACTIONS, COURSE_ACTIONS
+from services.rl.rl_service import ContextualBandit, INTERVIEW_ACTIONS, COURSE_ACTIONS
 from models import QTable, UserState
 
 Base.metadata.create_all(bind=engine)
@@ -377,17 +375,6 @@ async def evaluate_content(role: str, level: str, questions_answers: list) -> di
             "F": max(0.0, min(1.0, float(parsed.get("F", 0.0)))),
             "S": max(0.0, min(1.0, float(parsed.get("S", 0.0))))
         }
-        # Log RL metrics (no change to existing response structure)
-        try:
-            log_rl_metrics(
-                user_id=None,  # Will be set later in interview flow
-                state_id="",   # Will be computed later
-                metrics=rl_metrics,
-                reward=0.0,     # Will be computed later
-                context="interview_question"
-            )
-        except Exception:
-            pass  # Silent fail on RL metrics logging
         
         item = {
             "score": score,
@@ -1331,7 +1318,7 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
         report["weak_topics"] = categorize_weak_topics(content_result.get("weak_topics", []))
 
         # ============================================================
-        # RL: COURSE RECOMMENDATION & Q-TABLE UPDATE
+        # RL: BANDIT-BASED COURSE RECOMMENDATION & REWARD FEEDBACK
         # ============================================================
         try:
             weak_topics = content_result.get("weak_topics", [])
@@ -1339,26 +1326,74 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
                 weak_topics = [weak_topics]
             weak_topics = [str(t).strip() for t in weak_topics if str(t).strip()]
 
+            # STEP 1: Compute state
             state_id = get_state_id(overall, len(weak_topics))
+            logger.info(f"[BANDIT] Computing state: score={overall:.1f}, weak_count={len(weak_topics)}, state_id={state_id}")
 
+            # STEP 2: Get user state for previous score and session tracking
             user_state = db.query(UserState).filter(UserState.user_id == user.id).first()
-            previous_score = float(user_state.last_score) if user_state and user_state.last_score is not None else 0.0
+            previous_score = float(user_state.avg_score) if user_state and user_state.avg_score is not None else overall
             prev_state_id = user_state.state_id if user_state else state_id
+            logger.info(f"[BANDIT] Previous avg_score={previous_score:.1f}, prev_state_id={prev_state_id}")
 
-            course_learner = TabularQLearner(db=db, action_space="course")
+            # STEP 3: Select action using bandit
+            course_learner = ContextualBandit(db=db, action_space="course")
             action = course_learner.select_action(state_id, user_state)
+            logger.info(f"[BANDIT] Selected action={action} for state_id={state_id}")
 
-            total_metrics = {"C": 0.0, "K": 0.0, "F": 0.0, "S": 0.0}
-            for answer in content_answers:
-                rl_metrics = answer.get("_rl_metrics", {})
-                for key in total_metrics:
-                    total_metrics[key] += rl_metrics.get(key, 0.0)
+            # STEP 4: STRICT COURSE MAPPING - Action determines topics and difficulty
+            def get_fundamentals(topics_list):
+                """Get core/fundamental topics (first 2)."""
+                return topics_list[:2] if len(topics_list) > 0 else ["core concepts"]
 
-            num_questions = len(content_answers) if content_answers else 1
-            avg_metrics = {k: v / num_questions for k, v in total_metrics.items()}
+            def get_related_topics(topics_list):
+                """Get weak topics + expanded related topics."""
+                if len(topics_list) == 0:
+                    return ["core concepts"]
+                # Combine weak topics with logical expansions
+                expanded = topics_list.copy()
+                if len(expanded) < 3:
+                    # Add generic related concepts if weak topics < 3
+                    expanded.extend(["best practices", "advanced patterns"][:3-len(expanded)])
+                return expanded
 
-            reward = calculate_reward(avg_metrics, previous_score, normalize_final_score(overall))
+            def get_advanced_topics(topics_list):
+                """Get advanced/deep topics for high performers."""
+                if len(topics_list) == 0:
+                    return ["advanced concepts"]
+                # Focus on deeper aspects of weak topics
+                advanced = [f"advanced {t}" if "advanced" not in t.lower() else t for t in topics_list[:2]]
+                advanced.extend(["system design", "optimization"])
+                return advanced[:4]
 
+            # MAP ACTION → TOPICS + DIFFICULTY
+            if action == "revision":
+                course_topics = get_fundamentals(weak_topics)
+                course_difficulty = "easy"
+                logger.info(f"[BANDIT] ACTION=revision → topics={course_topics}, difficulty={course_difficulty}")
+
+            elif action == "easy":
+                course_topics = get_fundamentals(weak_topics)
+                course_difficulty = "easy"
+                logger.info(f"[BANDIT] ACTION=easy → topics={course_topics}, difficulty={course_difficulty}")
+
+            elif action == "mixed":
+                course_topics = get_related_topics(weak_topics)
+                course_difficulty = "medium"
+                logger.info(f"[BANDIT] ACTION=mixed → topics={course_topics}, difficulty={course_difficulty}")
+
+            elif action == "advanced":
+                course_topics = get_advanced_topics(weak_topics)
+                course_difficulty = "hard"
+                logger.info(f"[BANDIT] ACTION=advanced → topics={course_topics}, difficulty={course_difficulty}")
+
+            else:
+                # Fallback
+                course_topics = weak_topics
+                course_difficulty = "medium"
+                logger.warning(f"[BANDIT] Unknown action={action}, using weak_topics")
+
+            # STEP 5: ALWAYS run course generation with explicit topics and difficulty
             new_course_id = None
             try:
                 new_course_id = await create_course_internal(
@@ -1368,30 +1403,36 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
                     weak_topics,
                     action,
                     db,
+                    topics=course_topics,
+                    difficulty=course_difficulty,
                 )
+                logger.info(f"[BANDIT] Course created: id={new_course_id}, action={action}, topics={course_topics}, difficulty={course_difficulty}")
             except Exception as course_error:
                 logger.warning(
-                    "RL course generation failed for action=%s, falling back to revision: %s",
-                    action,
-                    str(course_error),
+                    f"[BANDIT] Course generation failed for action={action}: {str(course_error)}"
                 )
-                action = "revision"
+                new_course_id = None
+
+            # Fallback: always try to create a course if first attempt failed
+            if not new_course_id:
                 try:
+                    logger.info(f"[BANDIT] Attempting fallback course with revision action")
                     new_course_id = await create_course_internal(
                         user,
                         role,
                         level,
                         weak_topics,
-                        action,
+                        "revision",
                         db,
+                        topics=get_fundamentals(weak_topics),
+                        difficulty="easy",
                     )
+                    logger.info(f"[BANDIT] Fallback course created: id={new_course_id}")
                 except Exception as fallback_error:
-                    logger.warning(
-                        "RL course generation fallback also failed: %s",
-                        str(fallback_error),
-                    )
+                    logger.warning(f"[BANDIT] Fallback course generation also failed: {str(fallback_error)}")
                     new_course_id = None
 
+            # STEP 6: Fetch course details for response
             new_course = None
             if new_course_id:
                 new_course_row = db.query(Course).filter(Course.id == new_course_id).first()
@@ -1401,8 +1442,17 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
                         "title": new_course_row.title,
                     }
 
-            course_learner.update_q_table(prev_state_id, action, reward, state_id)
+            # STEP 7: Calculate SIMPLE reward = score improvement normalized to [-1, 1]
+            score_improvement = overall - previous_score  # range: -100 to +100
+            reward = score_improvement / 100.0  # normalize to [-1, +1]
+            reward = max(min(reward, 1.0), -1.0)  # clamp to [-1, 1]
+            logger.info(f"[BANDIT] Reward calculation: overall={overall:.1f} - previous={previous_score:.1f} = improvement={score_improvement:.1f} → normalized_reward={reward:.3f}")
 
+            # STEP 8: Update bandit with reward (no next_state needed)
+            course_learner.update_action_value(prev_state_id, action, reward)
+            logger.info(f"[BANDIT] Q-value updated: state={prev_state_id}, action={action}, reward={reward:.3f}")
+
+            # STEP 9: Update user state for next session
             if user_state:
                 user_state.state_id = state_id
                 user_state.last_score = overall
@@ -1426,6 +1476,7 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
 
             db.flush()
 
+            # STEP 10: Populate report with course and action
             report["new_course_id"] = new_course_id
             if new_course is not None:
                 report["new_course"] = new_course
@@ -1433,21 +1484,20 @@ async def api_interview_evaluate(request: Request, db: Session = Depends(get_db)
             report["rl_metrics"] = {
                 "state": state_id,
                 "previous_state": prev_state_id,
-                "metrics": avg_metrics,
-                "reward": reward,
                 "action": action,
+                "course_topics": course_topics,
+                "course_difficulty": course_difficulty,
+                "reward": reward,
+                "score_improvement": score_improvement,
                 "new_course_id": new_course_id,
             }
 
             logger.info(
-                "RL course generation: state_id=%s action=%s weak_topics=%s new_course_id=%s",
-                state_id,
-                action,
-                weak_topics,
-                new_course_id,
+                f"[BANDIT] COMPLETE: state={state_id}, action={action}, reward={reward:.3f}, "
+                f"course_id={new_course_id}, topics={course_topics}"
             )
         except Exception as e:
-            logger.warning(f"RL course recommendation failed: {str(e)}", exc_info=False)
+            logger.warning(f"[BANDIT] RL course recommendation failed: {str(e)}", exc_info=True)
             report["new_course_id"] = None
             report["recommended_action"] = "revision"
 
@@ -2338,23 +2388,52 @@ async def create_course_internal(
     weak_topics: list[str],
     action: str,
     db: Session,
+    topics: list[str] = None,
+    difficulty: str = "medium",
 ) -> int | None:
-    prompt_skill = role
+    """
+    Create a course with explicit topic selection and difficulty.
+    
+    Args:
+        user: User object
+        role: Job role
+        level: Experience level
+        weak_topics: Original weak topics from interview
+        action: Bandit action (revision, easy, mixed, advanced)
+        db: Database session
+        topics: EXPLICIT topics to cover (if None, uses weak_topics)
+        difficulty: EXPLICIT difficulty level (easy, medium, hard)
+    """
     weak_topics = [str(t).strip() for t in weak_topics if str(t).strip()]
+    weak_topics = weak_topics or ["core concepts"]
+    
+    # Use explicit topics if provided, otherwise use weak_topics
+    course_topics = topics if topics else weak_topics
+    course_topics = [str(t).strip() for t in course_topics if str(t).strip()]
+    topics_text = ", ".join(course_topics)
 
-    if action == "revision":
-        prompt_skill = f"{role} (review weak topics: {', '.join(weak_topics)})"
-    elif action == "easy":
-        prompt_skill = f"{role} (easy learning path with fundamentals and weak topics)"
-    elif action == "mixed":
-        prompt_skill = f"{role} (mixed weak topics and related new concepts: {', '.join(weak_topics[:3])})"
-    elif action == "advanced":
-        prompt_skill = f"{role} (advanced learning path with deeper coverage of weak areas)"
+    prompt = f"""
+Generate a course outline.
+
+COURSE PARAMETERS:
+- Action: {action}
+- Difficulty Level: {difficulty}
+- Topics to Cover: {topics_text}
+
+STRICT REQUIREMENTS:
+- FIRST 2 modules MUST directly cover these topics: {topics_text}
+- Each topic MUST appear explicitly in module titles
+- Set difficulty to {difficulty.upper()} throughout the course
+- Do NOT generalize or skip required topics
+- Remaining modules can expand related concepts
+- Module difficulty should match: {difficulty}
+"""
 
     outline_prompt_input = {
-        "skill": prompt_skill,
+        "skill": role,
         "level": level,
         "duration_hours": 20,
+        "strict_requirements": prompt,
     }
 
     outline_prompt = prompt_manager.get_prompt("course_outline", **outline_prompt_input)
@@ -2375,7 +2454,7 @@ async def create_course_internal(
     course = Course(
         user_id=user.id,
         role=role,
-        title=outline_json.get("course_title", f"{level.title()} {role} Course"),
+        title=outline_json.get("course_title", f"{level.title()} {role} - {action.title()} Course"),
         description=outline_json.get("description", ""),
         level=level,
         status="generated",
@@ -2385,7 +2464,7 @@ async def create_course_internal(
 
     outline_modules = outline_json.get("modules", [])
     if not isinstance(outline_modules, list) or len(outline_modules) == 0:
-        outline_modules = [{"module_title": wt, "topics": [wt]} for wt in weak_topics[:3]]
+        outline_modules = [{"module_title": t, "topics": [t]} for t in course_topics[:3]]
 
     total_modules = len(outline_modules)
     for idx, mod_data in enumerate(outline_modules):

@@ -2,18 +2,19 @@
 Reinforcement Learning Service
 ================================
 
-Implements tabular Q-learning for adaptive interview and course selection.
+Implements Contextual Multi-Armed Bandit for adaptive interview and course selection.
 
 Key Features:
+- Contextual bandits (state-aware action selection)
 - ε-greedy action selection with cold-start handling
-- Adaptive learning rate (decay with visit count)
-- State-action Q-value management
+- Running average reward tracking (no temporal difference)
+- State-action reward management
 - Production-safe logging
 
 Usage:
-    learner = TabularQLearner(db_session)
-    action = learner.select_action(state_id, user_state)
-    learner.update_q_table(state_id, action_id, reward, next_state_id)
+    bandit = ContextualBandit(db_session)
+    action = bandit.select_action(state_id, user_state)
+    bandit.update_action_value(state_id, action_id, reward)
 """
 
 import logging
@@ -44,22 +45,27 @@ COURSE_ACTIONS = {
 }
 
 # Hyperparameters
-GAMMA = 0.9  # Discount factor
-EPSILON = 0.2  # Exploration probability
-COLD_START_THRESHOLD = 3  # Sessions before using learned policy
+EPSILON = 0.2  # Exploration probability (20% explore, 80% exploit)
+COLD_START_THRESHOLD = 2  # Sessions before using learned policy
 
 
-class TabularQLearner:
+class ContextualBandit:
     """
-    Tabular Q-Learning agent for adaptive interview and course selection.
+    Contextual Multi-Armed Bandit agent for adaptive interview and course selection.
 
-    This learner maintains a Q-table of state-action values and uses
+    This bandit maintains action-reward associations per state and uses
     ε-greedy exploration to balance exploration vs exploitation.
+    
+    Key difference from Q-learning:
+    - No temporal difference or Bellman updates
+    - No next_state dependency
+    - Simple running average of rewards per (state, action) pair
+    - Faster convergence for immediate reward feedback
     """
 
     def __init__(self, db: Session, action_space: str = "interview"):
         """
-        Initialize the Q-learner.
+        Initialize the bandit.
 
         Args:
             db: SQLAlchemy session for database access
@@ -75,7 +81,7 @@ class TabularQLearner:
         else:
             raise ValueError(f"Unknown action space: {action_space}")
 
-        logger.info(f"QLearner initialized for {action_space} with {len(self.actions)} actions")
+        logger.info(f"ContextualBandit initialized for {action_space} with {len(self.actions)} actions")
 
     # ========================================================================
     # ACTION SELECTION (ε-GREEDY)
@@ -85,13 +91,13 @@ class TabularQLearner:
         """
         Select an action using ε-greedy strategy with cold-start handling.
 
-        Cold-start (first 3 sessions):
+        Cold-start (first 2 sessions):
         - Force easy actions to bootstrap learning
         - Interview: ask_easy_question
-        - Course: teach_easy
+        - Course: easy
 
         After cold-start:
-        - 80% probability: select action with highest Q-value
+        - 80% probability: select action with highest avg_reward
         - 20% probability: select random action
 
         Args:
@@ -107,22 +113,24 @@ class TabularQLearner:
         if session_count < COLD_START_THRESHOLD:
             action = self._cold_start_action()
             logger.info(
-                f"COLD_START: user_session_count={session_count} state_id={state_id} → action={action}"
+                f"[BANDIT] COLD_START: session_count={session_count} state_id={state_id} → action={action}"
             )
             return action
 
         # ====== EXPLOIT vs EXPLORE ======
+        q_values = self.get_q_value_dict(state_id)
+        
         if random.random() < (1 - EPSILON):
-            # EXPLOIT: choose greedy action
-            action = self._greedy_action(state_id)
-            logger.debug(
-                f"EXPLOIT: state_id={state_id} → action={action} (ε-greedy, greedy branch)"
+            # EXPLOIT: choose action with highest avg_reward
+            action = self._greedy_action(state_id, q_values)
+            logger.info(
+                f"[BANDIT] EXPLOIT: state_id={state_id} action={action} q_values={q_values}"
             )
         else:
             # EXPLORE: choose random action
             action = random.choice(list(self.actions.keys()))
-            logger.debug(
-                f"EXPLORE: state_id={state_id} → action={action} (ε-greedy, explore branch)"
+            logger.info(
+                f"[BANDIT] EXPLORE: state_id={state_id} action={action} q_values={q_values}"
             )
 
         return action
@@ -134,51 +142,47 @@ class TabularQLearner:
         else:
             return "easy"
 
-    def _greedy_action(self, state_id: str) -> str:
+    def _greedy_action(self, state_id: str, q_values: dict = None) -> str:
         """
-        Select the action with the highest Q-value for a given state.
+        Select the action with the highest Q-value (avg reward) for a given state.
 
-        If no Q-values exist for the state, return a random action
-        and initialize Q-values to 0.
+        If no Q-values exist for the state, return a random action.
 
         Args:
             state_id: Current state ID
+            q_values: Pre-computed Q-values dict (optional, for efficiency)
 
         Returns:
-            Action with highest Q-value
+            Action with highest avg reward
         """
-        best_action = None
-        best_q = float("-inf")
-
-        for action_name, action_id in self.actions.items():
-            q_value = self._get_q_value(state_id, action_name)
-
-            if q_value > best_q:
-                best_q = q_value
-                best_action = action_name
-
-        if best_action is None:
+        if q_values is None:
+            q_values = self.get_q_value_dict(state_id)
+        
+        if not q_values or all(v == 0.0 for v in q_values.values()):
+            # No learned values yet, random action
             best_action = random.choice(list(self.actions.keys()))
-            logger.debug(f"GREEDY: No Q-values for state_id={state_id}, defaulting to random")
+            logger.debug(f"[BANDIT] GREEDY: No Q-values for state_id={state_id}, returning random action")
+            return best_action
 
+        best_action = max(q_values.keys(), key=lambda a: q_values.get(a, 0.0))
         return best_action
 
     # ========================================================================
-    # Q-TABLE OPERATIONS
+    # Q-TABLE OPERATIONS (Q-VALUE = RUNNING AVERAGE OF REWARDS)
     # ========================================================================
 
     def _get_q_value(self, state_id: str, action_name: str) -> float:
         """
-        Fetch Q-value for (state, action) pair.
+        Fetch Q-value (running average reward) for (state, action) pair.
 
-        If not found in database, returns 0.0 (optimistic initialization).
+        If not found in database, returns 0.0.
 
         Args:
             state_id: State identifier
             action_name: Action name
 
         Returns:
-            Q-value (float), or 0.0 if not found
+            Q-value (running average reward), or 0.0 if not found
         """
         try:
             q_record = (
@@ -195,55 +199,32 @@ class TabularQLearner:
             else:
                 return 0.0
         except Exception as e:
-            logger.error(f"Error fetching Q-value: {e}")
-            return 0.0
-
-    def _get_max_q_next_state(self, next_state_id: str) -> float:
-        """
-        Get the maximum Q-value for all actions in the next state.
-
-        Used for the temporal difference update:
-        Q(s,a) ← Q(s,a) + α [ R + γ * max Q(s',a') - Q(s,a) ]
-
-        Args:
-            next_state_id: Next state identifier
-
-        Returns:
-            Maximum Q-value in next state, or 0.0 if no actions exist
-        """
-        try:
-            max_q = 0.0
-            for action_name in self.actions.keys():
-                q = self._get_q_value(next_state_id, action_name)
-                max_q = max(max_q, q)
-            return max_q
-        except Exception as e:
-            logger.error(f"Error fetching max Q for next state: {e}")
+            logger.error(f"[BANDIT] Error fetching Q-value: {e}")
             return 0.0
 
     # ========================================================================
-    # Q-TABLE UPDATE (MAIN LEARNING STEP)
+    # ACTION VALUE UPDATE (MAIN LEARNING STEP - RUNNING AVERAGE)
     # ========================================================================
 
-    def update_q_table(
+    def update_action_value(
         self,
         state_id: str,
         action_id: str,
         reward: float,
-        next_state_id: str,
     ) -> Tuple[float, float]:
         """
-        Update Q-value using temporal difference learning.
+        Update action value using running average (no temporal difference).
 
         Formula:
-            α = 1 / (1 + visit_count)
-            Q(s,a) ← Q(s,a) + α [ R + γ * max Q(s',a') - Q(s,a) ]
+            new_q = (old_q * visit_count + reward) / (visit_count + 1)
+
+        This is a simple bandit update: just average the rewards received
+        for this (state, action) pair. No next_state dependency.
 
         Args:
             state_id: Current state
             action_id: Selected action
             reward: Received reward (normalized 0-1)
-            next_state_id: Next state
 
         Returns:
             Tuple of (old_q_value, new_q_value)
@@ -263,41 +244,63 @@ class TabularQLearner:
                 q_record = QTable(
                     state_id=state_id,
                     action_id=action_id,
-                    q_value=0.0,
-                    visit_count=0,
+                    q_value=reward,  # First reward is the initial Q-value
+                    visit_count=1,
                 )
                 self.db.add(q_record)
                 self.db.flush()
-
-            old_q = float(q_record.q_value)
-
-            # Adaptive learning rate: α = 1 / (1 + visit_count)
-            alpha = 1.0 / (1.0 + q_record.visit_count)
-
-            # Temporal difference: R + γ * max Q(s',a') - Q(s,a)
-            max_q_next = self._get_max_q_next_state(next_state_id)
-            td_error = reward + GAMMA * max_q_next - old_q
-
-            # Update Q-value
-            new_q = old_q + alpha * td_error
-            q_record.q_value = new_q
-            q_record.visit_count += 1
+                old_q = 0.0
+                new_q = reward
+            else:
+                old_q = float(q_record.q_value)
+                
+                # Running average: new_q = (old_q * count + reward) / (count + 1)
+                new_q = (old_q * q_record.visit_count + reward) / (q_record.visit_count + 1)
+                
+                q_record.q_value = new_q
+                q_record.visit_count += 1
 
             self.db.commit()
 
             logger.info(
-                f"Q_UPDATE: state_id={state_id} action_id={action_id} "
-                f"reward={reward:.3f} α={alpha:.4f} "
-                f"Q_old={old_q:.3f} → Q_new={new_q:.3f} "
-                f"td_error={td_error:.3f} visit_count={q_record.visit_count}"
+                f"[BANDIT] UPDATE: state_id={state_id} action_id={action_id} "
+                f"reward={reward:.3f} Q_old={old_q:.3f} → Q_new={new_q:.3f} "
+                f"visit_count={q_record.visit_count}"
             )
 
             return old_q, new_q
 
         except Exception as e:
             self.db.rollback()
-            logger.error(f"Error updating Q-table: {e}", exc_info=True)
+            logger.error(f"[BANDIT] Error updating action value: {e}", exc_info=True)
             return 0.0, 0.0
+
+    def update_q_table(
+        self,
+        state_id: str,
+        action_id: str,
+        reward: float,
+        next_state_id: str = None,
+    ) -> Tuple[float, float]:
+        """
+        Backward compatibility wrapper for update_action_value.
+
+        This method exists for legacy code that may pass next_state_id.
+        The next_state_id parameter is IGNORED (bandit doesn't use it).
+
+        Args:
+            state_id: Current state
+            action_id: Selected action
+            reward: Received reward
+            next_state_id: IGNORED (for backward compatibility only)
+
+        Returns:
+            Tuple of (old_q_value, new_q_value)
+        """
+        logger.debug(
+            f"[BANDIT] update_q_table (legacy API) called: ignoring next_state_id={next_state_id}"
+        )
+        return self.update_action_value(state_id, action_id, reward)
 
     # ========================================================================
     # UTILITY METHODS
@@ -305,7 +308,7 @@ class TabularQLearner:
 
     def get_q_value_dict(self, state_id: str) -> dict:
         """
-        Get all Q-values for a given state.
+        Get all Q-values (running average rewards) for a given state.
 
         Useful for logging and debugging.
 
@@ -321,7 +324,7 @@ class TabularQLearner:
                 q_dict[action_name] = self._get_q_value(state_id, action_name)
             return q_dict
         except Exception as e:
-            logger.error(f"Error fetching Q-value dict: {e}")
+            logger.error(f"[BANDIT] Error fetching Q-value dict: {e}")
             return {}
 
     def reset_q_table(self) -> None:
@@ -333,7 +336,15 @@ class TabularQLearner:
         try:
             self.db.query(QTable).delete()
             self.db.commit()
-            logger.warning("Q-TABLE RESET: All Q-values deleted")
+            logger.warning("[BANDIT] Q-TABLE RESET: All Q-values deleted")
         except Exception as e:
             self.db.rollback()
-            logger.error(f"Error resetting Q-table: {e}")
+            logger.error(f"[BANDIT] Error resetting Q-table: {e}")
+
+
+# ============================================================================
+# BACKWARD COMPATIBILITY
+# ============================================================================
+
+# For legacy code that imports TabularQLearner
+TabularQLearner = ContextualBandit
